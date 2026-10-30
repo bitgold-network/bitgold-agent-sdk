@@ -1,0 +1,1332 @@
+"""Tests for ``ERC8183JobOps`` — async provider-side lifecycle ops (ERC-8183).
+
+Focus areas:
+- ``verify_job`` — status / provider / expiry / budget gating.
+- ``submit_result`` — manifest construction, upload, and on-chain submit.
+"""
+
+import asyncio
+import json
+import time
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+import pytest
+
+from bitgold_agent.erc8183.commerce import _decode_job
+from bitgold_agent.erc8183.job_ops import (
+    ERR_JOB_TOKEN_MISMATCH,
+    ERC8183JobOps,
+    funded_job_watcher,
+)
+from bitgold_agent.erc8183.negotiation import NegotiationHandler, build_job_description
+from bitgold_agent.erc8183.types import ZERO_ADDRESS, Job, JobStatus
+from bitgold_agent.networks import AssetId, get_asset
+
+ME = "0x" + "aa" * 20
+OTHER = "0x" + "bb" * 20
+CLIENT = "0x" + "cc" * 20
+EVALUATOR = "0x" + "ee" * 20
+COMMERCE = "0x" + "11" * 20
+POLICY = "0x" + "22" * 20
+TOKEN = get_asset(617, AssetId.TEST_BTG).address
+USDC = get_asset(617, AssetId.TEST_BTG).address
+USDT = get_asset(617, AssetId.TEST_BTG).address
+SELLER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+
+def _make_wallet(address=ME):
+    wp = MagicMock()
+    wp.address = address
+    return wp
+
+
+def _make_ops(
+    storage=None,
+    service_price=0,
+    wallet=None,
+    agent_url=None,
+    allow_unsigned_jobs=True,
+    allow_unrouted_jobs=False,
+    service_prices=None,
+):
+    kwargs = {
+        "storage_provider": storage,
+        "service_price": service_price,
+        "agent_url": agent_url,
+        "allow_unsigned_jobs": allow_unsigned_jobs,
+        "service_prices": service_prices,
+    }
+    if allow_unrouted_jobs:
+        kwargs["allow_unrouted_jobs"] = True
+    ops = ERC8183JobOps(wallet or _make_wallet(), **kwargs)
+    return ops
+
+
+def _inject_client(ops):
+    client = MagicMock()
+    client.address = ME
+    client.network.chain_id = 617
+    client.payment_token = TOKEN
+    client.job_payment_token.return_value = TOKEN
+    client.router.address = EVALUATOR
+    client.router.job_policy.return_value = POLICY
+    client.router.policy_whitelist.return_value = True
+    ops._client = client
+    return client
+
+
+def _job(
+    status=JobStatus.FUNDED,
+    provider=ME,
+    expired_at=None,
+    budget=1000,
+    description="",
+    evaluator=EVALUATOR,
+    hook=EVALUATOR,
+):
+    return Job(
+        id=1,
+        client=CLIENT,
+        provider=provider,
+        evaluator=evaluator,
+        description=description,
+        budget=budget,
+        expired_at=expired_at if expired_at is not None else int(time.time()) + 3600,
+        status=status,
+        hook=hook,
+    )
+
+
+def _signed_description(negotiated_at, *, currency=TOKEN, service_price="1000", nested=False):
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    account = Account.from_key(SELLER_KEY)
+    wallet = MagicMock()
+    wallet.address = account.address
+    wallet.sign_message.side_effect = lambda message: {
+        "signature": account.sign_message(encode_defunct(text=message)).signature
+    }
+    handler = NegotiationHandler(
+        service_price=service_price,
+        currency=currency,
+        wallet_provider=wallet,
+        chain_id=617,
+        verifying_contract=COMMERCE,
+    )
+    with patch("bitgold_agent.erc8183.negotiation.time.time", return_value=negotiated_at):
+        quote = handler.negotiate(
+            {
+                "task_description": "Summarize the report",
+                "terms": {"deliverables": "summary", "quality_standards": "accurate"},
+            }
+        )
+    envelope = quote.to_dict()
+    description = json.dumps(envelope) if nested else build_job_description(envelope)
+    return description, account.address
+
+
+class TestAgentAddress:
+    def test_uses_wallet_address(self):
+        ops = _make_ops()
+        assert ops.agent_address == ME
+
+    def test_requires_wallet_or_provider_address(self):
+        with pytest.raises(ValueError, match="provider_address"):
+            ERC8183JobOps(None)  # type: ignore[arg-type]
+
+
+class TestVerifyJob:
+    def _nested_quote_ops(
+        self, *, budget=1000, job_token=TOKEN, root_bait=True, allow_unsigned_jobs=False
+    ):
+        negotiated_at = int(time.time()) - 60
+        description, provider = _signed_description(negotiated_at, nested=True)
+        if root_bait:
+            envelope = json.loads(description)
+            envelope.update(task="attacker task", terms={}, price="1", currency=USDC)
+            description = json.dumps(envelope)
+        ops = _make_ops(wallet=_make_wallet(provider), allow_unsigned_jobs=allow_unsigned_jobs)
+        client = _inject_client(ops)
+        client.policy.dispute_window.return_value = 0
+        client.get_job_funded_block.return_value = 123
+        client.commerce.address = COMMERCE
+        client.w3.eth.chain_id = 617
+        client.w3.eth.get_block.return_value = {"timestamp": negotiated_at + 30}
+        client.w3.eth.get_code.return_value = b""
+        client.payment_token = job_token
+        client.job_payment_token.return_value = job_token
+        client.get_job.return_value = _job(
+            provider=provider, description=description, budget=budget
+        )
+        return ops, client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("allow_unsigned_jobs", [False, True])
+    async def test_native_nested_envelope_is_accepted(self, allow_unsigned_jobs):
+        ops, client = self._nested_quote_ops(
+            root_bait=False, allow_unsigned_jobs=allow_unsigned_jobs
+        )
+        original = await ops.get_job(1)
+        envelope = json.loads(original["description"])
+        assert not {"version", "negotiated_at", "quote_expires_at", "task"} & envelope.keys()
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True, result
+        assert result["job"] == {**original, "description": build_job_description(envelope)}
+        client.get_job_funded_block.assert_called_once_with(
+            1,
+            negotiated_at=envelope["response"]["negotiated_at"],
+            quote_expires_at=envelope["response"]["quote_expires_at"],
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "field",
+        ["negotiation_hash", "provider_sig", "chain_id", "negotiated_at", "quote_expires_at"],
+    )
+    async def test_native_nested_envelope_requires_signed_metadata(self, field):
+        ops, client = self._nested_quote_ops(root_bait=False, allow_unsigned_jobs=True)
+        envelope = json.loads(client.get_job.return_value.description)
+        source = (
+            envelope["response"] if field in {"negotiated_at", "quote_expires_at"} else envelope
+        )
+        source.pop(field)
+        client.get_job.return_value = replace(
+            client.get_job.return_value, description=json.dumps(envelope)
+        )
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "quote_invalid"
+        client.get_job_funded_block.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["negotiated_at", "quote_expires_at"])
+    async def test_native_nested_envelope_rejects_root_time_tampering(self, field):
+        ops, client = self._nested_quote_ops(root_bait=False)
+        envelope = json.loads(client.get_job.return_value.description)
+        envelope[field] = envelope["response"][field] + (1 if field == "negotiated_at" else -1)
+        client.get_job.return_value = replace(
+            client.get_job.return_value, description=json.dumps(envelope)
+        )
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "quote_invalid"
+        assert "negotiation_hash mismatch" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_native_nested_envelope_uses_canonical_time_fallback(self):
+        ops, client = self._nested_quote_ops(root_bait=False)
+        envelope = json.loads(client.get_job.return_value.description)
+        envelope.update(negotiated_at=0, quote_expires_at=0)
+        client.get_job.return_value = replace(
+            client.get_job.return_value, description=json.dumps(envelope)
+        )
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True, result
+        assert result["job"]["description"] == build_job_description(envelope)
+        client.get_job_funded_block.assert_called_once_with(
+            1,
+            negotiated_at=envelope["response"]["negotiated_at"],
+            quote_expires_at=envelope["response"]["quote_expires_at"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_native_nested_envelope_rejects_invalid_signature_with_unsigned_opt_in(self):
+        ops, client = self._nested_quote_ops(root_bait=False, allow_unsigned_jobs=True)
+        envelope = json.loads(client.get_job.return_value.description)
+        envelope["provider_sig"] = "not-hex"
+        client.get_job.return_value = replace(
+            client.get_job.return_value, description=json.dumps(envelope)
+        )
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "quote_invalid"
+        assert "missing or invalid provider_sig" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_split_envelope_cannot_lower_signed_budget(self):
+        ops, _ = self._nested_quote_ops(budget=999, job_token=USDC)
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "budget_too_low"
+        assert "signed quote price (1000)" in result["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("root_currency", [TOKEN, USDC])
+    async def test_split_envelope_returns_canonical_authenticated_job(self, root_currency):
+        ops, client = self._nested_quote_ops()
+        envelope = json.loads(client.get_job.return_value.description)
+        envelope["currency"] = root_currency
+        client.get_job.return_value = _job(
+            provider=client.get_job.return_value.provider, description=json.dumps(envelope)
+        )
+        original = await ops.get_job(1)
+        envelope = json.loads(original["description"])
+        expected_description = build_job_description(envelope)
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True
+        assert result["job"] == {**original, "description": expected_description}
+        parsed = json.loads(result["job"]["description"])
+        assert parsed["task"] == "Summarize the report"
+        assert parsed["terms"] == {
+            "deliverables": "summary",
+            "quality_standards": "accurate",
+        }
+        assert parsed["price"] == "1000"
+        assert parsed["currency"] == TOKEN
+        assert client.get_job.return_value.description == original["description"]
+
+    @pytest.mark.asyncio
+    async def test_valid_funded_job(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        result = await ops.verify_job(1)
+        assert result["valid"] is True
+        assert result["job"]["jobId"] == 1
+
+    @pytest.mark.asyncio
+    async def test_rejects_evaluator_outside_configured_router(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(evaluator=OTHER)
+
+        result = await ops.verify_job(1)
+
+        assert result == {
+            "valid": False,
+            "error": "Job evaluator is not the configured Router",
+            "error_code": "untrusted_routing",
+        }
+
+    @pytest.mark.asyncio
+    async def test_rejects_hook_outside_configured_router(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(hook=OTHER)
+
+        result = await ops.verify_job(1)
+
+        assert result == {
+            "valid": False,
+            "error": "Job hook is not the configured Router",
+            "error_code": "untrusted_routing",
+        }
+
+    @pytest.mark.asyncio
+    async def test_rejects_job_without_registered_router_policy(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.router.job_policy.return_value = ZERO_ADDRESS
+
+        result = await ops.verify_job(1)
+
+        assert result == {
+            "valid": False,
+            "error": "Job is not registered with a Router policy",
+            "error_code": "untrusted_routing",
+        }
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_whitelisted_router_policy(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.router.policy_whitelist.return_value = False
+
+        result = await ops.verify_job(1)
+
+        assert result == {
+            "valid": False,
+            "error": "Job policy is not whitelisted by the Router",
+            "error_code": "untrusted_routing",
+        }
+
+    @pytest.mark.asyncio
+    async def test_router_policy_timeout_is_retryable_chain_error(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.router.job_policy.side_effect = TimeoutError("rpc://secret")
+
+        result = await ops.verify_job(1)
+
+        assert result == {
+            "valid": False,
+            "error": "Temporary chain/RPC error",
+            "error_code": "chain_unavailable",
+            "retryable": True,
+        }
+
+    @pytest.mark.asyncio
+    async def test_allow_unrouted_jobs_accepts_legacy_unrouted_job(self):
+        ops = _make_ops(allow_unrouted_jobs=True)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(evaluator=OTHER, hook=OTHER)
+        client.router.job_policy.return_value = ZERO_ADDRESS
+        client.router.policy_whitelist.return_value = False
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsigned_job_by_default(self):
+        ops = ERC8183JobOps(_make_wallet())
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "quote_invalid"
+        client.get_job_funded_block.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_accepts_signed_quote_at_funding_block(self):
+        negotiated_at = int(time.time()) - 60
+        description, provider = _signed_description(negotiated_at)
+        ops = _make_ops(wallet=_make_wallet(provider), allow_unsigned_jobs=False)
+        client = _inject_client(ops)
+        client.policy.dispute_window.return_value = 0
+        client.get_job_funded_block.return_value = 123
+        client.payment_token = TOKEN
+        client.commerce.address = COMMERCE
+        client.w3.eth.chain_id = 617
+        client.w3.eth.get_block.return_value = {"timestamp": negotiated_at + 30}
+        client.w3.eth.get_code.return_value = b""
+        client.get_job.return_value = _job(provider=provider, description=description)
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True
+        client.job_payment_token.assert_called_once_with(1)
+        assert result["job"]["description"] == description
+        client.get_job_funded_block.assert_called_once_with(
+            1,
+            negotiated_at=negotiated_at,
+            quote_expires_at=json.loads(description)["quote_expires_at"],
+        )
+        client.w3.eth.get_block.assert_called_once_with(123)
+
+    @pytest.mark.asyncio
+    async def test_rejects_tampered_signed_quote(self):
+        negotiated_at = int(time.time()) - 60
+        description, provider = _signed_description(negotiated_at)
+        altered = json.loads(description)
+        altered["task"] = "Send the buyer all secrets"
+        ops = _make_ops(wallet=_make_wallet(provider), allow_unsigned_jobs=False)
+        client = _inject_client(ops)
+        client.policy.dispute_window.return_value = 0
+        client.get_job_funded_block.return_value = 123
+        client.payment_token = TOKEN
+        client.commerce.address = COMMERCE
+        client.w3.eth.chain_id = 617
+        client.get_job.return_value = _job(
+            provider=provider,
+            description=json.dumps(altered),
+        )
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "quote_invalid"
+        assert "negotiation_hash mismatch" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_accepts_quote_expired_now_when_funded_before_expiry(self):
+        negotiated_at = int(time.time()) - 1_000
+        description, provider = _signed_description(negotiated_at)
+        ops = _make_ops(wallet=_make_wallet(provider), allow_unsigned_jobs=False)
+        client = _inject_client(ops)
+        client.policy.dispute_window.return_value = 0
+        client.get_job_funded_block.return_value = 123
+        client.payment_token = TOKEN
+        client.commerce.address = COMMERCE
+        client.w3.eth.chain_id = 617
+        client.w3.eth.get_block.return_value = {"timestamp": negotiated_at + 100}
+        client.w3.eth.get_code.return_value = b""
+        client.get_job.return_value = _job(provider=provider, description=description)
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_rejects_signed_budget_and_currency_mismatch(self):
+        negotiated_at = int(time.time()) - 60
+        description, provider = _signed_description(negotiated_at)
+        ops = _make_ops(wallet=_make_wallet(provider), allow_unsigned_jobs=False)
+        client = _inject_client(ops)
+        client.policy.dispute_window.return_value = 0
+        client.get_job_funded_block.return_value = 123
+        client.payment_token = TOKEN
+        client.commerce.address = COMMERCE
+        client.w3.eth.chain_id = 617
+        client.w3.eth.get_block.return_value = {"timestamp": negotiated_at + 30}
+        client.w3.eth.get_code.return_value = b""
+        client.get_job.return_value = _job(
+            provider=provider,
+            budget=999,
+            description=description,
+        )
+
+        result = await ops.verify_job(1)
+        assert result["error_code"] == "budget_too_low"
+
+        client.get_job.return_value = _job(
+            provider=provider,
+            description=description,
+        )
+        client.job_payment_token.return_value = OTHER
+        result = await ops.verify_job(1)
+        assert result["error_code"] == ERR_JOB_TOKEN_MISMATCH
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_job_token_on_catalog_network(self):
+        ops = _make_ops(service_prices={AssetId.TEST_BTG: 1})
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.job_payment_token.return_value = OTHER
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == ERR_JOB_TOKEN_MISMATCH
+        assert "0x" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_job_token_rpc_value_error_is_retryable_chain_error(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.job_payment_token.side_effect = ValueError("execution reverted")
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "chain_unavailable"
+        assert result["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_job_token_rpc_timeout_is_retryable_chain_error(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.job_payment_token.side_effect = TimeoutError("rpc://secret")
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "chain_unavailable"
+        assert result["retryable"] is True
+        assert "secret" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_local_job_token_remains_stable_mismatch(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        client.job_payment_token.return_value = "not-an-address"
+
+        result = await ops.verify_job(1)
+
+        assert result["error_code"] == ERR_JOB_TOKEN_MISMATCH
+
+    @pytest.mark.asyncio
+    async def test_default_payment_token_read_failure_is_retryable_chain_error(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        type(client).payment_token = PropertyMock(side_effect=TimeoutError("rpc://secret"))
+
+        result = await ops.verify_job(1)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "chain_unavailable"
+        assert result["retryable"] is True
+
+    @pytest.mark.parametrize("asset_id", ["USDC", AssetId.BTG])
+    def test_service_prices_reject_symbol_and_cross_chain_asset(self, asset_id):
+        with pytest.raises((KeyError, ValueError)):
+            _make_ops(service_prices={asset_id: 1})
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_funded(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.OPEN)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert "FUNDED" in result["error"]
+        assert result["error_code"] == "wrong_status"
+
+    @pytest.mark.asyncio
+    async def test_rejects_foreign_provider(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(provider=OTHER)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert result["error_code"] == "not_assigned"
+
+    @pytest.mark.asyncio
+    async def test_rejects_expired(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(expired_at=int(time.time()) - 100)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert result["error_code"] == "job_expired"
+
+    @pytest.mark.asyncio
+    async def test_rejects_under_priced(self):
+        ops = _make_ops(service_price=5000)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(budget=1000)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert result["error_code"] == "budget_too_low"
+        assert result["service_price"] == "5000"
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_description_fail_closed(self):
+        import json as _json
+
+        bad = _json.dumps(
+            {
+                "version": 1,
+                "negotiated_at": 1_700_000_000,
+                "task": "x",
+                "terms": {"deliverables": "y", "quality_standards": "z"},
+                "price": "1",
+                "currency": "0x" + "00" * 20,
+                # type-confused: string instead of int
+                "quote_expires_at": "not-an-int",
+            }
+        )
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(description=bad)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert result["error_code"] == "description_invalid"
+        assert "Malformed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_accepts_expired_quote_when_funded(self):
+        # Regression guard for BUG-V2-629-02: once a job is FUNDED the price is
+        # already escrowed on-chain, so an elapsed negotiation quote TTL must NOT
+        # block fulfillment — re-checking it here only strands escrowed funds.
+        import json as _json
+
+        past = int(time.time()) - 1
+        expired_quote = _json.dumps(
+            {
+                "version": 1,
+                "negotiated_at": past - 60,
+                "task": "x",
+                "terms": {"deliverables": "y", "quality_standards": "z"},
+                "price": "1",
+                "currency": "0x" + "00" * 20,
+                "quote_expires_at": past,
+            }
+        )
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(description=expired_quote)
+        result = await ops.verify_job(1)
+        assert result["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_expired_quote_still_budget_gated(self):
+        # The economic guard after funding is the budget check, not the quote TTL:
+        # an under-budget FUNDED job with an expired quote is still rejected, and
+        # via budget_too_low (not the removed quote_expired path).
+        import json as _json
+
+        past = int(time.time()) - 1
+        expired_quote = _json.dumps(
+            {
+                "version": 1,
+                "negotiated_at": past - 60,
+                "task": "x",
+                "terms": {"deliverables": "y", "quality_standards": "z"},
+                "price": "1",
+                "currency": "0x" + "00" * 20,
+                "quote_expires_at": past,
+            }
+        )
+        ops = _make_ops(service_price=5000)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(budget=1000, description=expired_quote)
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert result["error_code"] == "budget_too_low"
+
+    @pytest.mark.asyncio
+    async def test_accepts_equal_or_higher_budget(self):
+        ops = _make_ops(service_price=1000)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(budget=1000)
+        result = await ops.verify_job(1)
+        assert result["valid"] is True
+
+
+class TestSubmitResult:
+    @pytest.mark.asyncio
+    async def test_submit_uploads_and_returns_deliverable(self, tmp_path):
+        from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
+
+        storage = LocalStorageProvider(str(tmp_path))
+        ops = _make_ops(storage=storage, agent_url="http://agent.example/erc8183")
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        client.submit.return_value = {"transactionHash": "0xaa"}
+        client.commerce.address = "0x" + "11" * 20
+        client.router.address = EVALUATOR
+        client.policy.address = "0x" + "33" * 20
+        client.commerce.w3.eth.chain_id = 617
+
+        result = await ops.submit_result(1, "hello")
+        assert result["success"] is True
+        assert "deliverable" in result
+        assert "deliverableUrl" in result
+
+    @pytest.mark.asyncio
+    async def test_submit_blocked_on_failed_verify(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.OPEN)
+        result = await ops.submit_result(1, "x")
+        assert result["success"] is False
+        client.submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_response_content_size_cap_enforced(self, monkeypatch):
+        monkeypatch.setenv("ERC8183_MAX_RESPONSE_BYTES", "1024")
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        result = await ops.submit_result(1, "x" * 1025)
+        assert result["success"] is False
+        assert result["error_code"] == "payload_too_large"
+        assert "response_content size" in result["error"]
+        client.submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_metadata_size_cap_enforced(self, monkeypatch):
+        monkeypatch.setenv("ERC8183_MAX_METADATA_BYTES", "256")
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        result = await ops.submit_result(1, "ok", metadata={"k": "v" * 400})
+        assert result["success"] is False
+        assert result["error_code"] == "payload_too_large"
+        assert "metadata size" in result["error"]
+        client.submit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_within_caps_proceeds(self, tmp_path):
+        from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
+
+        storage = LocalStorageProvider(str(tmp_path))
+        ops = _make_ops(storage=storage, agent_url="http://agent.example/erc8183")
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        client.submit.return_value = {"transactionHash": "0xaa"}
+        client.commerce.address = "0x" + "11" * 20
+        client.router.address = EVALUATOR
+        client.policy.address = "0x" + "33" * 20
+        client.commerce.w3.eth.chain_id = 617
+
+        result = await ops.submit_result(1, "ok", metadata={"small": "value"})
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_file_url_rewritten_to_agent_endpoint(self, tmp_path):
+        from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
+
+        storage = LocalStorageProvider(str(tmp_path))
+        ops = _make_ops(storage=storage, agent_url="http://myagent.example/erc8183")
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        client.submit.return_value = {"transactionHash": "0xab"}
+        client.commerce.address = "0x" + "11" * 20
+        client.router.address = EVALUATOR
+        client.policy.address = "0x" + "33" * 20
+        client.commerce.w3.eth.chain_id = 617
+
+        result = await ops.submit_result(1, "payload")
+        assert result["success"] is True
+        assert result["deliverableUrl"] == "http://myagent.example/erc8183/job/1/response"
+        # chain submit received the agent endpoint URL, not the file:// URL
+        call_kwargs = client.submit.call_args
+        opt_params = call_kwargs[0][2]
+        assert opt_params["deliverable_url"] == "http://myagent.example/erc8183/job/1/response"
+        # internal cache still holds the raw file:// URL
+        assert ops._deliverable_urls[1].startswith("file://")
+
+    @pytest.mark.asyncio
+    async def test_ipfs_url_passed_through_unchanged(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        mock_storage = MagicMock()
+        mock_storage.upload = AsyncMock(return_value="ipfs://QmFakeHash1234")
+        ops = _make_ops(storage=mock_storage)  # no agent_url needed for ipfs
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        client.submit.return_value = {"transactionHash": "0xac"}
+        client.commerce.address = "0x" + "11" * 20
+        client.router.address = EVALUATOR
+        client.policy.address = "0x" + "33" * 20
+        client.commerce.w3.eth.chain_id = 617
+
+        result = await ops.submit_result(1, "payload")
+        assert result["success"] is True
+        assert result["deliverableUrl"] == "ipfs://QmFakeHash1234"
+
+    @pytest.mark.asyncio
+    async def test_file_url_without_agent_url_raises(self, tmp_path):
+        from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
+
+        storage = LocalStorageProvider(str(tmp_path))
+        ops = _make_ops(storage=storage, agent_url=None)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(status=JobStatus.FUNDED)
+        client.commerce.address = "0x" + "11" * 20
+        client.router.address = EVALUATOR
+        client.policy.address = "0x" + "33" * 20
+        client.commerce.w3.eth.chain_id = 617
+
+        result = await ops.submit_result(1, "payload")
+        assert result["success"] is False
+        assert "ERC8183_AGENT_URL" in result["error"]
+
+
+class TestErrorSanitization:
+    """Audit M02: raw RPC exceptions embed the API-keyed URL on transport
+    errors; they must never reach the HTTP response body."""
+
+    SECRET = "https://bitgold-mainnet.nodereal.io/v1/SECRET_KEY"
+
+    @pytest.mark.asyncio
+    async def test_get_job_does_not_leak_rpc_url(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.side_effect = Exception(f"429 Too Many Requests for url: {self.SECRET}")
+        result = await ops.get_job(1)
+        assert result["success"] is False
+        assert "SECRET_KEY" not in result["error"]
+        assert "nodereal" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_verify_job_does_not_leak_rpc_url(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.get_job.side_effect = Exception(f"Max retries exceeded with url: {self.SECRET}")
+        result = await ops.verify_job(1)
+        assert result["valid"] is False
+        assert "SECRET_KEY" not in result["error"]
+
+
+class TestGetPendingJobs:
+    @pytest.mark.asyncio
+    async def test_startup_scan_zero_counter(self):
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.commerce.job_counter.return_value = 0
+        result = await ops.get_pending_jobs()
+        assert result == {"success": True, "jobs": []}
+        assert ops._startup_scan_done
+
+    @pytest.mark.asyncio
+    async def test_startup_scan_filters_to_funded_owned(self):
+        from dataclasses import replace
+
+        ops = _make_ops()
+        client = _inject_client(ops)
+        client.commerce.job_counter.return_value = 3
+
+        mine_funded = replace(_job(status=JobStatus.FUNDED, provider=ME), id=1)
+        other_funded = replace(_job(status=JobStatus.FUNDED, provider=OTHER), id=2)
+        mine_completed = replace(_job(status=JobStatus.COMPLETED, provider=ME), id=3)
+        client.commerce.get_jobs_batch.return_value = [mine_funded, other_funded, mine_completed]
+
+        result = await ops.get_pending_jobs()
+        assert result["success"]
+        ids = [j["jobId"] for j in result["jobs"]]
+        assert ids == [1]
+
+
+class TestKeylessConstruction:
+    """ERC8183JobOps can read/poll without a signing wallet."""
+
+    def test_requires_wallet_or_address(self):
+        with pytest.raises(ValueError, match="provider_address"):
+            ERC8183JobOps()
+
+    def test_provider_address_only_sets_agent_address(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        assert ops.agent_address.lower() == ME.lower()
+
+    @pytest.mark.asyncio
+    async def test_read_works_without_wallet(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job()
+        result = await ops.get_job(1)
+        assert result["success"] is True
+        assert result["jobId"] == 1
+
+    @pytest.mark.asyncio
+    async def test_submit_result_requires_wallet(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        with pytest.raises(ValueError, match="requires a signing wallet_provider"):
+            await ops.submit_result(1, "content")
+
+
+class TestFundedJobWatcher:
+    """Signer-free watcher fires a callback but never submits."""
+
+    @pytest.mark.asyncio
+    async def test_fires_callback_and_never_submits(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        job = {"jobId": 1, "provider": ME}
+        ops.get_pending_jobs = AsyncMock(return_value={"success": True, "jobs": [job]})
+        ops.verify_job = AsyncMock(return_value={"valid": True, "job": job})
+        ops.submit_result = AsyncMock()  # spy — must never be called
+
+        seen: list[int] = []
+
+        async def on_funded(j):
+            seen.append(j["jobId"])
+
+        stop = asyncio.Event()
+        stop.set()  # exit after exactly one poll pass
+        await funded_job_watcher(ops, on_funded, interval=0.01, stop=stop)
+
+        assert seen == [1]
+        ops.submit_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sync_callback", [False, True])
+    async def test_dispatches_verified_job_on_initial_and_retry(self, sync_callback):
+        ops = ERC8183JobOps(provider_address=ME)
+        raw = {
+            "success": True,
+            "jobId": 1,
+            "status": JobStatus.FUNDED,
+            "expiredAt": int(time.time()) + 3600,
+            "description": "attacker task",
+        }
+        verified = {**raw, "description": "authenticated task"}
+        stop = asyncio.Event()
+        polls = 0
+
+        async def get_pending_jobs():
+            nonlocal polls
+            polls += 1
+            if polls >= 2:
+                stop.set()
+            return {"success": True, "jobs": [raw]}
+
+        ops.get_pending_jobs = get_pending_jobs
+        ops.get_job = AsyncMock(return_value=raw)
+        ops.verify_job = AsyncMock(return_value={"valid": True, "job": verified})
+        received = []
+
+        def callback(job):
+            received.append(job)
+            return False if len(received) == 1 else None
+
+        async def async_callback(job):
+            return callback(job)
+
+        await funded_job_watcher(
+            ops, callback if sync_callback else async_callback, interval=0.001, stop=stop
+        )
+
+        assert received == [verified, verified]
+        assert all(job is verified for job in received)
+        assert ops.verify_job.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("retryable", [False, True])
+    async def test_verifies_before_dispatch_and_honors_retryability(self, retryable):
+        ops = ERC8183JobOps(provider_address=ME)
+        raw = {
+            "success": True,
+            "jobId": 1,
+            "status": JobStatus.FUNDED,
+            "expiredAt": int(time.time()) + 3600,
+        }
+        verified = {**raw, "description": "authenticated task"}
+        stop = asyncio.Event()
+        polls = 0
+
+        async def get_pending_jobs():
+            nonlocal polls
+            polls += 1
+            if polls >= 3:
+                stop.set()
+            return {"success": True, "jobs": [raw]}
+
+        ops.get_pending_jobs = get_pending_jobs
+        ops.get_job = AsyncMock(return_value=raw)
+        ops.verify_job = AsyncMock(side_effect=[
+            {"valid": False, "retryable": retryable},
+            {"valid": True, "job": verified},
+        ])
+        on_funded = AsyncMock()
+
+        await funded_job_watcher(ops, on_funded, interval=0.001, stop=stop)
+
+        if retryable:
+            on_funded.assert_awaited_once_with(verified)
+            assert ops.verify_job.call_count == 2
+        else:
+            on_funded.assert_not_called()
+            ops.verify_job.assert_awaited_once_with(1)
+
+
+class TestGetSubmittedJobs:
+    """Discover SUBMITTED jobs (for opt-in auto-settle)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_only_submitted_for_provider(self):
+        from dataclasses import replace
+
+        ops = ERC8183JobOps(provider_address=ME)
+        client = _inject_client(ops)
+        client.commerce.job_counter.return_value = 3
+        mine_submitted = replace(
+            _job(status=JobStatus.SUBMITTED, provider=ME), id=1, submitted_at=111
+        )
+        other_submitted = replace(_job(status=JobStatus.SUBMITTED, provider=OTHER), id=2)
+        mine_funded = replace(_job(status=JobStatus.FUNDED, provider=ME), id=3)
+        client.commerce.get_jobs_batch.return_value = [
+            mine_submitted,
+            other_submitted,
+            mine_funded,
+        ]
+
+        result = await ops.get_submitted_jobs()
+        assert result["success"]
+        ids = [j["jobId"] for j in result["jobs"]]
+        assert ids == [1]
+        assert result["jobs"][0]["submittedAt"] == 111
+
+    @pytest.mark.asyncio
+    async def test_scan_error_carries_structured_envelope(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        client = _inject_client(ops)
+        client.commerce.job_counter.side_effect = ValueError(
+            {"code": -32005, "message": "limit exceeded"}
+        )
+        result = await ops.get_submitted_jobs()
+        assert result["success"] is False
+        assert result["error_code"] == "chain_unavailable"
+        assert result["rpc_error_code"] == -32005
+
+
+class TestDecodeJob:
+    """submittedAt (getJob tuple index 9) is surfaced on Job."""
+
+    def test_decodes_submitted_at_from_index_9(self):
+        raw = (
+            7,
+            "0x" + "11" * 20,
+            "0x" + "22" * 20,
+            "0x" + "33" * 20,
+            "desc",
+            1000,
+            2000,  # expiredAt (index 6)
+            JobStatus.SUBMITTED.value,  # status (index 7)
+            "0x" + "44" * 20,  # hook (index 8)
+            1500,  # submittedAt (index 9)
+            b"\x00" * 32,  # deliverable (index 10)
+        )
+        job = _decode_job(raw)
+        assert job.submitted_at == 1500
+        assert job.expired_at == 2000
+        assert job.status == JobStatus.SUBMITTED
+
+
+class TestFundedJobWatcherRetry:
+    """Failed callbacks re-fire after on-chain re-validation (BUG-04).
+
+    ``get_pending_jobs`` reports each FUNDED job only once (cursor-based),
+    so the watcher re-validates retry candidates via ``get_job``.
+    """
+
+    def _ops_with_one_poll(self, job):
+        ops = ERC8183JobOps(provider_address=ME)
+        ops.verify_job = AsyncMock(return_value={"valid": True, "job": job})
+        polls = [{"success": True, "jobs": [job]}]
+
+        async def get_pending_jobs():
+            return polls.pop(0) if polls else {"success": True, "jobs": []}
+
+        ops.get_pending_jobs = get_pending_jobs
+        ops.verify_job = AsyncMock(return_value={"valid": True, "job": job})
+        return ops
+
+    @staticmethod
+    def _fresh(status=JobStatus.FUNDED):
+        return {
+            "success": True,
+            "jobId": 1,
+            "provider": ME,
+            "status": status,
+            "expiredAt": int(time.time()) + 3600,
+        }
+
+    @pytest.mark.asyncio
+    async def test_raising_callback_refires_after_revalidation(self):
+        ops = self._ops_with_one_poll({"jobId": 1, "provider": ME})
+        ops.get_job = AsyncMock(return_value=self._fresh())
+
+        calls: list[int] = []
+        stop = asyncio.Event()
+
+        async def on_funded(job):
+            calls.append(job["jobId"])
+            if len(calls) == 1:
+                raise RuntimeError("transient boom")
+            stop.set()
+
+        await funded_job_watcher(ops, on_funded, interval=0.01, stop=stop)
+        assert calls == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_false_return_opts_into_retry(self):
+        ops = self._ops_with_one_poll({"jobId": 1, "provider": ME})
+        ops.get_job = AsyncMock(return_value=self._fresh())
+
+        calls: list[int] = []
+        stop = asyncio.Event()
+
+        async def on_funded(job):
+            calls.append(job["jobId"])
+            if len(calls) == 1:
+                return False
+            stop.set()
+
+        await funded_job_watcher(ops, on_funded, interval=0.01, stop=stop)
+        assert calls == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_none_return_keeps_fire_once_compat(self):
+        ops = ERC8183JobOps(provider_address=ME)
+        ops.verify_job = AsyncMock(return_value={"valid": True, "job": {"jobId": 1}})
+        stop = asyncio.Event()
+        poll_count = 0
+
+        async def get_pending_jobs():
+            nonlocal poll_count
+            poll_count += 1
+            if poll_count >= 3:
+                stop.set()
+            return {"success": True, "jobs": [{"jobId": 1, "provider": ME}]}
+
+        ops.get_pending_jobs = get_pending_jobs
+        calls: list[int] = []
+
+        async def on_funded(job):
+            calls.append(job["jobId"])
+
+        await funded_job_watcher(ops, on_funded, interval=0.01, stop=stop)
+        assert calls == [1]
+
+    @pytest.mark.asyncio
+    async def test_retry_dropped_when_job_leaves_funded(self):
+        ops = self._ops_with_one_poll({"jobId": 1, "provider": ME})
+        stop = asyncio.Event()
+
+        async def get_job(job_id):
+            stop.set()
+            return self._fresh(status=JobStatus.SUBMITTED)
+
+        ops.get_job = get_job
+        calls: list[int] = []
+
+        async def on_funded(job):
+            calls.append(job["jobId"])
+            raise RuntimeError("boom")
+
+        await funded_job_watcher(ops, on_funded, interval=0.01, stop=stop)
+        assert calls == [1]
+
+
+class TestExcErrorFields:
+    """Error envelopes never embed dict-reprs or RPC URLs (BUG-09)."""
+
+    def test_web3_dict_error_surfaces_inner_message(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = ValueError({"code": -32000, "message": "insufficient funds for gas"})
+        fields = _exc_error_fields(exc)
+        assert fields["error"] == "insufficient funds for gas"
+        assert fields["error_code"] == "internal_error"
+        assert fields["rpc_error_code"] == -32000
+
+    def test_rate_limited_rpc_is_503(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = ValueError({"code": -32005, "message": "limit exceeded"})
+        fields = _exc_error_fields(exc)
+        assert fields["error_code"] == "chain_unavailable"
+        assert fields["rpc_error_code"] == -32005
+
+    def test_transport_error_does_not_leak_url(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = ConnectionError(
+            "HTTPSConnectionPool(host='rpc.example.com'): Max retries exceeded "
+            "with url: /v1/SECRETKEY"
+        )
+        fields = _exc_error_fields(exc)
+        assert "SECRETKEY" not in fields["error"]
+        assert fields["error_code"] == "chain_unavailable"
+
+    def test_revert_reason_passes_through(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = RuntimeError("Transaction would revert: NotProvider")
+        fields = _exc_error_fields(exc)
+        assert fields["error"] == "Transaction would revert: NotProvider"
+        assert fields["error_code"] == "internal_error"
+
+    def test_non_transient_url_is_redacted_not_replaced(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = RuntimeError(
+            "Cannot publish: ERC8183_AGENT_URL is not set (e.g. http://localhost:8003/erc8183)"
+        )
+        fields = _exc_error_fields(exc)
+        assert "ERC8183_AGENT_URL" in fields["error"]
+        assert "localhost" not in fields["error"]
+
+    @pytest.mark.asyncio
+    async def test_submit_result_verify_failure_propagates_error_code(self):
+        ops = _make_ops()
+        ops.verify_job = AsyncMock(
+            return_value={
+                "valid": False,
+                "error": "Job status is SUBMITTED, expected FUNDED",
+                "error_code": "wrong_status",
+            }
+        )
+        result = await ops.submit_result(1, "content")
+        assert result["success"] is False
+        assert result["error_code"] == "wrong_status"
+
+
+class TestGetResponseClassification:
+    """Unresolvable deliverable for a submitted job is 503, not 404 (BUG-06)."""
+
+    def _ops(self, status_result):
+        storage = MagicMock(spec=["download", "upload"])
+        ops = _make_ops(storage=storage)
+        client = _inject_client(ops)
+        client.get_deliverable_url.return_value = None
+        ops.get_job = AsyncMock(return_value={"provider": ME, **status_result})
+        return ops
+
+    @pytest.mark.asyncio
+    async def test_submitted_job_unresolvable_is_503(self):
+        ops = self._ops({"success": True, "status": JobStatus.SUBMITTED})
+        result = await ops.get_response(1)
+        assert result["success"] is False
+        assert result["error_code"] == "chain_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_completed_job_unresolvable_is_503(self):
+        ops = self._ops({"success": True, "status": JobStatus.COMPLETED})
+        result = await ops.get_response(1)
+        assert result["error_code"] == "chain_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_never_submitted_job_is_genuine_404(self):
+        ops = self._ops({"success": True, "status": JobStatus.FUNDED})
+        result = await ops.get_response(1)
+        assert result["error_code"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_is_chain_unavailable(self):
+        ops = self._ops(
+            {
+                "success": False,
+                "error": "Temporary chain/RPC error",
+                "error_code": "chain_unavailable",
+                "retryable": True,
+            }
+        )
+        result = await ops.get_response(1)
+        assert result["error_code"] == "chain_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_resolution_is_chain_unavailable_after_status_check(self):
+        from bitgold_agent.exceptions import RpcRangeLimitError
+
+        storage = MagicMock(spec=["download", "upload"])
+        ops = _make_ops(storage=storage)
+        client = _inject_client(ops)
+        client.get_deliverable_url.side_effect = RpcRangeLimitError("limit exceeded")
+        ops.get_job = AsyncMock(
+            return_value={"success": True, "status": JobStatus.SUBMITTED, "provider": ME}
+        )
+        result = await ops.get_response(1)
+        assert result["success"] is False
+        assert result["error_code"] == "chain_unavailable"
+        ops.get_job.assert_awaited_once_with(1)
+
+
+class TestRetryableContract:
+    """Permanent rejections carry no retryable flag; transient ones carry True."""
+
+    @pytest.mark.asyncio
+    async def test_permanent_rejection_not_retryable(self):
+        ops = _make_ops(service_price=10)
+        client = _inject_client(ops)
+        client.get_job.return_value = _job(budget=1)
+        client.token_decimals.return_value = 18
+        result = await ops.verify_job(1)
+        assert result["error_code"] == "budget_too_low"
+        assert "retryable" not in result
+
+    def test_transient_exception_is_retryable(self):
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        fields = _exc_error_fields(Exception("connection timeout"))
+        assert fields["error_code"] == "chain_unavailable"
+        assert fields["retryable"] is True
+
+    def test_pending_tx_is_not_retryable_and_carries_hash(self):
+        """A broadcast-yet-unconfirmed write must NOT be flagged retryable
+        (a blind retry would risk a double-broadcast) and must expose tx_hash."""
+        from bitgold_agent import TransactionPendingError
+        from bitgold_agent.erc8183.job_ops import _exc_error_fields
+
+        exc = TransactionPendingError(tx_hash="0x" + "ab" * 32, timeout_seconds=300)
+        fields = _exc_error_fields(exc)
+        assert fields["error_code"] == "tx_pending"
+        assert fields["retryable"] is False
+        assert fields["tx_hash"] == "0x" + "ab" * 32

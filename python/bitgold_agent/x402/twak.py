@@ -1,0 +1,277 @@
+"""TwakX402Payer — delegated x402 payments through the twak CLI."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from web3 import Web3
+
+from ..wallets.twak_provider import (
+    TwakPaymentNotSentError,
+    TwakPaymentTerms,
+    TwakPaymentTermsMismatchError,
+)
+from .budget import SessionBudgetTracker
+from .errors import (
+    X402AmountExceededError,
+    X402NoPayableRouteError,
+    X402PolicyError,
+    X402RecipientMismatchError,
+)
+from .payer import X402PaymentResult, X402Quote
+
+if TYPE_CHECKING:
+    from ..wallets.twak_provider import TWAKProvider
+
+#: Default cap on the challenge's claimed ``maxTimeoutSeconds`` (design F-2).
+#: Deliberately wider than SigningPolicy's 600s window: field-verified Bazaar
+#: spec endpoints (onesource) advertise 3600s, and on the twak path the
+#: *actual* signing validity window is set by twak internally — this check
+#: only constrains what the challenge claims, a different risk class.
+DEFAULT_MAX_TIMEOUT_SECONDS = 3600
+
+#: twak's default when a challenge entry names no transfer method.
+_DEFAULT_TRANSFER_METHOD = "eip3009"
+
+
+def _canonical_method(method: str | None) -> str:
+    """Normalise a transfer method the way twak's ``canonicalMethod`` does."""
+    lower = (method or _DEFAULT_TRANSFER_METHOD).lower()
+    return "permit2-exact" if lower == "permit2" else lower
+
+
+class TwakX402Payer:
+    """X402Payer backed by the twak CLI's built-in x402 client.
+
+    This is the SDK-primitives guard layer of the three-layer defense in
+    depth (design §3.2): the application policy layer (host allowlists,
+    USD budgets) sits above and calls this payer; twak's own
+    ``--max-payment`` hard cap sits below — the per-call cap is therefore
+    enforced **twice by design** (once by the precheck here, once inside
+    twak). SigningPolicy itself cannot run on this path (the EIP-712
+    payload is built, signed and discarded inside the twak process), so
+    each of its rules has a semantic equivalent in the quote-terms
+    precheck: domain ↔ ``asset``, validity window ↔ ``maxTimeoutSeconds``.
+    """
+
+    def __init__(
+        self,
+        provider: TWAKProvider,
+        *,
+        expected_pay_to: str,
+        expected_asset: str,
+        session_budget: SessionBudgetTracker | None = None,
+        max_timeout_seconds: int = DEFAULT_MAX_TIMEOUT_SECONDS,
+    ) -> None:
+        """
+        Args:
+            provider: The :class:`~bitgold_agent.wallets.TWAKProvider` whose CLI
+                executes quotes and payments.
+            session_budget: Optional cumulative spend tracker, keyed by
+                token (asset) address. Shared with the X402Signer path.
+            expected_pay_to: Trusted recipient anchor. The quoted ``payTo``
+                must byte-equal this address.
+            expected_asset: Trusted payment-token anchor. The quoted
+                ``asset`` must equal this address.
+            max_timeout_seconds: Reject challenges claiming a payment
+                window wider than this (default 3600s, design F-2).
+        """
+        self._provider = provider
+        self._session_budget = session_budget
+        self._expected_pay_to = Web3.to_checksum_address(expected_pay_to)
+        self._expected_asset = Web3.to_checksum_address(expected_asset)
+        self._max_timeout_seconds = max_timeout_seconds
+
+    def quote(
+        self, url: str, *, method: str = "GET", body: str | None = None
+    ) -> X402Quote:
+        """Fetch the 402 challenge for ``url``.
+
+        Read-only: never triggers wallet creation (design F-3 — the
+        provider's ``x402_quote`` does not call ``_ensure_wallet``).
+        """
+        data = self._provider.x402_quote(url, method=method, body=body)
+        return X402Quote.from_cli(data)
+
+    def request(
+        self,
+        url: str,
+        *,
+        max_payment: int,
+        method: str = "GET",
+        body: str | None = None,
+        prefer_method: str | None = None,
+        auto_approve: bool = False,
+    ) -> X402PaymentResult:
+        """Fetch ``url``, paying up to ``max_payment`` atomic units.
+
+        Flow: quote → pick route → five-point precheck → reserve budget →
+        ``twak x402 request`` pinned to the prechecked route → result built
+        from the quoted terms (the CLI surfaces no settlement receipt,
+        gaps S-7).
+
+        TOCTOU note: twak re-discovers the challenge between our quote and
+        its payment. ``--prefer-network``/``--prefer-asset``/``--prefer-method``
+        pin the route, ``--max-payment`` is set to the prechecked quoted
+        amount (not ``max_payment``), and the provider confirms twak's
+        pre-signing prompt only if its amount, token contract, network and
+        recipient equal the prechecked ones; any drift is declined before
+        signing.
+
+        Budget: the reservation is released only when no payment can have
+        been sent (twak failed before the confirmation, reported the payment
+        cancelled / Permit2 approval required, or, on the verified twak
+        release, returned a response without asking to sign). Once the payment
+        was confirmed, a failure keeps the amount reserved and raises
+        :class:`~bitgold_agent.wallets.TwakPaymentStateUnknownError`; a paid
+        response is returned verbatim, even if its body reports an error.
+        """
+        quoted = self.quote(url, method=method, body=body)
+        if not quoted.accepts:
+            raise X402NoPayableRouteError(
+                f"no payable route for {url}: the quote's accepts list is "
+                "empty (the twak client filters out routes on chains it "
+                "cannot pay)"
+            )
+        # twak applies --prefer-method before choosing the route it pays, so
+        # the route must be filtered the same way BEFORE the precheck below;
+        # otherwise the precheck validates one route and twak pays another.
+        candidates = quoted.accepts
+        method_pref = _canonical_method(prefer_method) if prefer_method else None
+        if method_pref is not None:
+            candidates = tuple(
+                o for o in candidates if _canonical_method(o.transfer_method) == method_pref
+            )
+            if not candidates:
+                raise X402NoPayableRouteError(
+                    f"no payable route for {url} with transfer method {method_pref!r}"
+                )
+        option = next((o for o in candidates if o.preferred), candidates[0])
+
+        # --- five-point precheck on the quoted terms (design §3.2) -------
+        # 1. payTo: byte-equal vs the caller's committed recipient.
+        if option.pay_to.lower() != self._expected_pay_to.lower():
+            raise X402RecipientMismatchError(
+                f"quoted payTo {option.pay_to} != expected "
+                f"{self._expected_pay_to}"
+            )
+        # 2. asset: for EIP-3009 the asset address IS the EIP-712 domain
+        #    verifyingContract — this is the SigningPolicy domain allowlist
+        #    check relocated to the quote terms (the payload itself never
+        #    crosses the process boundary).
+        if option.asset.lower() != self._expected_asset.lower():
+            raise X402PolicyError(
+                f"quoted asset {option.asset} != expected "
+                f"{self._expected_asset} (asset is the EIP-712 "
+                "verifyingContract for EIP-3009 routes)"
+            )
+        # 3. amount: per-call cap. twak's --max-payment below is the quoted
+        #    amount itself, which is at most this cap.
+        if option.amount > max_payment:
+            raise X402AmountExceededError(
+                f"quoted amount {option.amount} exceeds max_payment "
+                f"{max_payment} for {option.asset}"
+            )
+        # 4. claimed validity window (when the option carries one).
+        #    Default 3600s, NOT SigningPolicy's 600s (design F-2): twak sets
+        #    the actual signing window internally; we only bound the claim.
+        if (
+            option.max_timeout_seconds is not None
+            and option.max_timeout_seconds > self._max_timeout_seconds
+        ):
+            raise X402PolicyError(
+                f"quoted maxTimeoutSeconds {option.max_timeout_seconds} "
+                f"exceeds the configured cap {self._max_timeout_seconds}"
+            )
+        # 5. network/asset/method route pinning: passed through to the
+        #    request as --prefer-network/--prefer-asset/--prefer-method below
+        #    (TOCTOU narrowing — twak re-discovers the challenge and must land
+        #    on the route we prechecked; its prompt does not show the transfer
+        #    method). The quote's CAIP-2 network string ("eip155:618") is
+        #    passed verbatim — twak accepts CAIP or chain key.
+
+        # Session budget: reserve the QUOTED amount before the slow CLI
+        # call and roll back only if nothing can have been sent
+        # (reserve/rollback keeps the check-and-increment atomic while the
+        # payment runs outside the lock). We debit the quoted amount because
+        # the CLI surfaces no settlement receipt to reconcile against (S-7).
+        if self._session_budget is not None:
+            self._session_budget.reserve(option.asset, option.amount)
+        signed: list[TwakPaymentTerms] = []
+        try:
+            # twak re-fetches the challenge before paying and only checks its
+            # amount against --max-payment; capping it at the reserved quote
+            # keeps the budget ledger an upper bound on what twak can pay.
+            response = self._provider.x402_request(
+                url,
+                max_payment=option.amount,
+                method=method,
+                body=body,
+                prefer_network=option.network,
+                prefer_asset=option.asset,
+                prefer_method=_canonical_method(option.transfer_method),
+                auto_approve=auto_approve,
+                # twak shows the re-fetched challenge's final terms before
+                # signing; the provider confirms only if they match these (the
+                # amount may be lower) and reports what it confirmed.
+                expected_terms=TwakPaymentTerms(
+                    amount=option.amount,
+                    asset=option.asset,
+                    network=option.network,
+                    pay_to=option.pay_to,
+                ),
+                on_confirm=signed.append,
+            )
+        except TwakPaymentTermsMismatchError as e:
+            if self._session_budget is not None:
+                self._session_budget.rollback(option.asset, option.amount)
+            if e.field == "pay_to":
+                raise X402RecipientMismatchError(
+                    f"twak's final payTo {e.actual} != quoted {option.pay_to}; declined "
+                    "before signing"
+                ) from e
+            if e.field == "prompt":
+                raise X402PolicyError(
+                    f"twak's confirmation prompt was not recognised ({e.actual!r}); "
+                    "declined before signing"
+                ) from e
+            if e.field == "amount":
+                raise X402PolicyError(
+                    f"twak's final payment amount {e.actual} exceeds quoted {e.expected}; "
+                    "declined before signing"
+                ) from e
+            raise X402PolicyError(
+                f"twak's final payment {e.field} {e.actual!r} != quoted {e.expected!r}; "
+                "declined before signing"
+            ) from e
+        except TwakPaymentNotSentError as e:
+            if self._session_budget is not None:
+                self._session_budget.rollback(option.asset, option.amount)
+            raise e.error from None
+        except Exception:
+            self._release_unsigned(option, signed)
+            raise
+
+        self._release_unsigned(option, signed)
+        return X402PaymentResult(
+            success=True,
+            response=response,
+            amount=signed[0].amount if signed else option.amount,
+            asset=option.asset,
+            network=option.network,
+            pay_to=option.pay_to,
+            transaction=self._extract_tx_hash(response),
+        )
+
+    def _release_unsigned(self, option: Any, signed: list[TwakPaymentTerms]) -> None:
+        """Keep only the confirmed amount reserved when twak signed less than quoted."""
+        if self._session_budget is not None and signed and signed[0].amount < option.amount:
+            self._session_budget.rollback(option.asset, option.amount - signed[0].amount)
+
+    @staticmethod
+    def _extract_tx_hash(response: Any) -> str | None:
+        """Best-effort tx hash from the endpoint body (most bodies have none)."""
+        if isinstance(response, dict):
+            tx = response.get("tx_hash") or response.get("txHash")
+            return str(tx) if tx else None
+        return None

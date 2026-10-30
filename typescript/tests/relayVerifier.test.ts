@@ -1,0 +1,226 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  RELAY_VERIFIER_ENDPOINT_TIMEOUT_MS,
+  type TxProbeResult,
+  confirmTxUnseen,
+  resolveFallbackRpcUrls,
+} from "../src/core/relayVerifier.js";
+import {
+  BITGOLD_MAINNET_CHAIN_ID,
+  BITGOLD_TESTNET_CHAIN_ID,
+} from "../src/networks/addresses.js";
+
+const HASH = `0x${"ab".repeat(32)}` as `0x${string}`;
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+/** Build a probe that answers per-URL from a lookup table. */
+function tableProbe(
+  table: Record<string, TxProbeResult>,
+): (url: string) => Promise<TxProbeResult> {
+  return async (url: string) => table[url] ?? "error";
+}
+
+describe("resolveFallbackRpcUrls", () => {
+  it("explicit opts beat env and the built-in table", () => {
+    vi.stubEnv("BITGOLD_AGENT_FALLBACK_RPC_URLS", "https://env.example");
+    expect(
+      resolveFallbackRpcUrls({
+        chainId: BITGOLD_TESTNET_CHAIN_ID,
+        fallbackRpcUrls: ["https://a.example", "https://b.example"],
+      }),
+    ).toEqual(["https://a.example", "https://b.example"]);
+  });
+
+  it("env (comma-separated) beats the built-in table", () => {
+    vi.stubEnv(
+      "BITGOLD_AGENT_FALLBACK_RPC_URLS",
+      " https://x.example , https://y.example ,",
+    );
+    expect(resolveFallbackRpcUrls({ chainId: BITGOLD_TESTNET_CHAIN_ID })).toEqual([
+      "https://x.example",
+      "https://y.example",
+    ]);
+  });
+
+  it("falls back to the built-in per-chain table", () => {
+    const testnet = resolveFallbackRpcUrls({ chainId: BITGOLD_TESTNET_CHAIN_ID });
+    const mainnet = resolveFallbackRpcUrls({ chainId: BITGOLD_MAINNET_CHAIN_ID });
+    expect(testnet.length).toBeGreaterThan(0);
+    expect(mainnet.length).toBeGreaterThan(0);
+    expect(testnet.every((u) => u.startsWith("https://"))).toBe(true);
+  });
+
+  it("unknown chain yields no endpoints", () => {
+    expect(resolveFallbackRpcUrls({ chainId: 1337 })).toEqual([]);
+  });
+
+  it("dedupes the primary RPC (case/trailing-slash-insensitive) and repeats", () => {
+    expect(
+      resolveFallbackRpcUrls({
+        chainId: BITGOLD_TESTNET_CHAIN_ID,
+        primaryRpcUrl: "https://A.example/",
+        fallbackRpcUrls: [
+          "https://a.example",
+          "https://b.example",
+          "https://b.example/",
+        ],
+      }),
+    ).toEqual(["https://b.example"]);
+  });
+
+  it("treats URLs on the same origin as one independent source", () => {
+    expect(
+      resolveFallbackRpcUrls({
+        chainId: BITGOLD_TESTNET_CHAIN_ID,
+        fallbackRpcUrls: [
+          "https://rpc.example/key-a",
+          "https://rpc.example/key-b",
+          "https://other.example/rpc",
+        ],
+      }),
+    ).toEqual(["https://rpc.example/key-a", "https://other.example/rpc"]);
+  });
+});
+
+describe("confirmTxUnseen", () => {
+  it("all unseen -> confirmed-unseen", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example", "https://two.example"],
+      probe: tableProbe({
+        "https://one.example": "unseen",
+        "https://two.example": "unseen",
+      }),
+    });
+    expect(verdict).toBe("confirmed-unseen");
+  });
+
+  it("two independent seen endpoints agree -> seen", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: [
+        "https://one.example",
+        "https://two.example",
+        "https://three.example",
+      ],
+      probe: tableProbe({
+        "https://one.example": "seen",
+        "https://two.example": "seen",
+        "https://three.example": "error",
+      }),
+    });
+    expect(verdict).toBe("seen");
+  });
+
+  it("one seen answer is inconclusive rather than authoritative", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example", "https://two.example"],
+      probe: tableProbe({
+        "https://one.example": "seen",
+        "https://two.example": "unseen",
+      }),
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+
+  it("a single conflicting seen answer blocks a two-source unseen quorum", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: [
+        "https://one.example",
+        "https://two.example",
+        "https://three.example",
+      ],
+      probe: tableProbe({
+        "https://one.example": "unseen",
+        "https://two.example": "unseen",
+        "https://three.example": "seen",
+      }),
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+
+  it("one unseen answer plus an error is inconclusive", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example", "https://two.example"],
+      probe: tableProbe({
+        "https://one.example": "error",
+        "https://two.example": "unseen",
+      }),
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+
+  it("all error -> inconclusive", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example", "https://two.example"],
+      probe: tableProbe({}),
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+
+  it("a throwing probe counts as error, never rejects", async () => {
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example"],
+      probe: async () => {
+        throw new Error("boom");
+      },
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+
+  it("no usable endpoints -> inconclusive without probing", async () => {
+    const probe = vi.fn(async (): Promise<TxProbeResult> => "unseen");
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: 1337,
+      probe,
+    });
+    expect(verdict).toBe("inconclusive");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("passes the per-endpoint timeout to the probe", async () => {
+    const probe = vi.fn(
+      async (
+        _url: string,
+        _hash: `0x${string}`,
+        timeoutMs: number,
+      ): Promise<TxProbeResult> => {
+        expect(timeoutMs).toBe(RELAY_VERIFIER_ENDPOINT_TIMEOUT_MS);
+        return "unseen";
+      },
+    );
+    await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example"],
+      probe,
+    });
+    expect(probe).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a transaction object whose hash differs from the query", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ result: { hash: `0x${"cd".repeat(32)}` } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const verdict = await confirmTxUnseen(HASH, {
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+      fallbackRpcUrls: ["https://one.example", "https://two.example"],
+    });
+    expect(verdict).toBe("inconclusive");
+  });
+});

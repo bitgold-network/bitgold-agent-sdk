@@ -1,0 +1,1114 @@
+"""
+Negotiation data structures and handler aligned with ERC-8183 (ERC-8183 Protocol).
+
+V1 implements single-round HTTP negotiation:
+  User sends requirements + quality standards → Agent returns price or rejects.
+
+The TermSpecification follows ERC-8183's structured terms:
+  Agreed Service + Compensation + Evaluation.
+
+NegotiationHandler provides a ready-to-use negotiation processor for agents:
+  handler = NegotiationHandler(service_price="20000000000000000000", currency="0x...")
+  result = handler.negotiate(request_data)
+
+On-chain Description (v1 schema)
+---------------------------------
+build_job_description(result.to_dict()) produces a compact JSON string for
+createJob(). It embeds the full agreed terms + provider signature so neither
+party can tamper with the negotiation record after the job is on-chain.
+
+  {
+    "version": 1,
+    "negotiated_at": <unix ts>,
+    "quote_expires_at": <unix ts>,
+    "task": "<task_description>",
+    "terms": { "deliverables", "quality_standards",
+               "success_criteria"? },
+    "price": "<wei>",
+    "currency": "<token address>",
+    "negotiation_hash": "0x...",   # keccak256 of above (without hash/sig fields)
+    "provider_sig": "0x..."         # EIP-191 signature over negotiation_hash
+  }
+
+UMA dispute voters read job.description verbatim from the assertion claim.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
+
+from ..networks import AssetId, PaymentAsset, get_asset, list_assets, parse_asset_id
+
+logger = logging.getLogger(__name__)
+
+# Maximum byte length of the on-chain job.description string. It is stored as
+# a Solidity `string` (unbounded by type), so this is a self-imposed cap to
+# bound createJob gas and keep the UMA assertion claim readable. ~536 bytes
+# are fixed overhead (negotiation_hash, provider_sig, addresses, JSON keys);
+# the remainder is user text shared across task + terms.
+MAX_DESCRIPTION_BYTES = 4096
+
+
+class DescriptionTooLongError(ValueError):
+    """Raised by :func:`build_job_description` when the assembled on-chain
+    description exceeds ``max_length``. Truncating would invalidate
+    negotiation_hash / provider_sig, so the description is rejected instead."""
+
+
+class QuoteSigningError(RuntimeError):
+    """Raised when a configured quote signer cannot produce a signature.
+
+    An accepted quote must never be returned unsigned once the provider has
+    configured signing.  Callers may map this operational failure to a
+    retryable transport status such as HTTP 503.
+    """
+
+
+if TYPE_CHECKING:
+    from ..wallets.protocols import MessageSigner
+    from .client import ERC8183Client
+    from .schema import JobDescription
+
+
+class ReasonCode:
+    """ERC-8183 standard rejection codes (aligned with whitepaper + PRD FR-06)."""
+
+    PRICE_TOO_LOW = "0x01"
+    DEADLINE_TOO_TIGHT = "0x02"
+    INCAPABLE = "0x03"
+    AMBIGUOUS_TERMS = "0x04"
+    BUSY = "0x05"
+    UNSUPPORTED = "0x06"
+    TASK_TOO_LONG = "0x07"  # task + terms exceed the on-chain description cap
+
+
+def _normalize_atomic_price(value: str | int, *, field_name: str = "price") -> str:
+    """Return a canonical non-negative base-10 atomic-unit string."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"{field_name} must be a non-negative integer")
+        return str(value)
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not value.isdecimal()
+        or (value != "0" and value.startswith("0"))
+    ):
+        raise ValueError(f"{field_name} must be a canonical non-negative integer string")
+    return value
+
+
+# Every spelling web3 uses for "the revert carried no returndata": ``None`` and
+# the ``MISSING_DATA`` sentinel when the node omitted the ``data`` field (what
+# Bitgold's public RPC does), ``"0x"`` when it sent an empty one. The sentinel is
+# spelled out rather than imported from ``web3._utils.error_formatters_utils``
+# so we do not depend on a private module path across the supported web3 6/7
+# range; should a future web3 rename it, this stops matching and callers fall
+# back to failing closed.
+_EMPTY_REVERT_DATA = frozenset({"", "0x", "no data"})
+
+
+def _lacks_multi_token_surface(exc: Exception) -> bool:
+    """Tell "this deployment has no multi-token surface" from "the chain could
+    not answer".
+
+    A Commerce that implements ``isPaymentTokenSupported`` reads a mapping and
+    cannot revert, while one deployed before multi-token support has no such
+    selector and its dispatcher reverts with empty returndata. A revert that
+    carries nothing back is therefore a definite answer about the contract,
+    whereas one carrying a reason string or a custom error is the function
+    itself refusing (e.g. paused) and says nothing about the selector existing.
+
+    Emptiness is read off ``ContractLogicError.data`` rather than the revert
+    text, which is provider wording: web3 fills ``data`` whenever there was
+    returndata to decode, so an ``Error(string)`` revert keeps its ABI-encoded
+    payload there and a custom error arrives as ``ContractCustomError`` (a
+    ``ContractLogicError`` subclass) whose ``data`` holds at least its 4-byte
+    selector — both non-empty, both kept failing closed.
+    ``BadFunctionCallOutput`` covers a node answering ``0x`` without reverting;
+    it is also raised for an address with no code, but the single-token
+    fallback then has to read ``paymentToken()`` successfully, so an
+    unreachable contract still fails closed there.
+
+    Transport failures are not reverts and never reach this classification.
+    """
+    if isinstance(exc, BadFunctionCallOutput):
+        return True
+    if not isinstance(exc, ContractLogicError):
+        return False
+    return exc.data is None or (
+        isinstance(exc.data, str) and exc.data.strip().lower() in _EMPTY_REVERT_DATA
+    )
+
+
+@dataclass
+class TermSpecification:
+    """
+    ERC-8183 protocol term specification — the core output of negotiation.
+    Shared between V1 (single-round HTTP) and V2 (multi-round Memo + on-chain PoA).
+
+    Fields map to ERC-8183's categories:
+      - Agreed Service: deliverables, quality_standards, success_criteria
+      - Compensation: price, currency
+      - Evaluation: evaluation_required, evaluator_type
+    """
+
+    deliverables: str
+    quality_standards: str
+
+    success_criteria: list[str] | None = None
+
+    price: str | int | None = None
+    currency: str | None = None
+
+    evaluation_required: bool = True
+    evaluator_type: str = "uma_oov3"
+
+    def __post_init__(self) -> None:
+        if self.price is not None:
+            self.price = _normalize_atomic_price(self.price)
+
+    def to_dict(self) -> dict:
+        result = {
+            "deliverables": self.deliverables,
+            "quality_standards": self.quality_standards,
+            "evaluation_required": self.evaluation_required,
+            "evaluator_type": self.evaluator_type,
+        }
+        if self.success_criteria is not None:
+            result["success_criteria"] = self.success_criteria
+        if self.price is not None:
+            result["price"] = self.price
+        if self.currency is not None:
+            result["currency"] = self.currency
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TermSpecification:
+        return cls(
+            deliverables=data["deliverables"],
+            quality_standards=data["quality_standards"],
+            success_criteria=data.get("success_criteria"),
+            price=data.get("price"),
+            currency=data.get("currency"),
+            evaluation_required=data.get("evaluation_required", True),
+            evaluator_type=data.get("evaluator_type", "uma_oov3"),
+        )
+
+
+@dataclass
+class NegotiationRequest:
+    """
+    User → Agent: pricing inquiry.
+
+    User fills in task_description and terms (with quality_standards as the
+    non-negotiable baseline). Agent must agree to standards before quoting.
+
+    The request_hash is computed by the Client and anchored on-chain at
+    createJobAndLock to prevent post-hoc tampering of the request.
+    """
+
+    task_description: str
+    terms: TermSpecification
+
+    context_urls: list[str] | None = None
+    request_id: str | None = None
+
+    def to_dict(self) -> dict:
+        """Return the request content (without hash)."""
+        result = {
+            "task_description": self.task_description,
+            "terms": self.terms.to_dict(),
+        }
+        if self.context_urls:
+            result["context_urls"] = self.context_urls
+        if self.request_id:
+            result["request_id"] = self.request_id
+        return result
+
+    def compute_hash(self) -> str:
+        """
+        Compute keccak256 hash of the canonical request for on-chain anchoring.
+        Returns hex string with 0x prefix.
+        """
+        from web3 import Web3
+
+        canonical_json = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        h = Web3.keccak(text=canonical_json).hex()
+        return h if h.startswith("0x") else "0x" + h
+
+    def to_envelope(self) -> dict:
+        """
+        Return wrapped structure with request content and its hash.
+
+        {
+            "request": { task_description, terms, ... },
+            "request_hash": "0x..."
+        }
+        """
+        return {
+            "request": self.to_dict(),
+            "request_hash": self.compute_hash(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> NegotiationRequest:
+        return cls(
+            task_description=data["task_description"],
+            terms=TermSpecification.from_dict(data["terms"]),
+            context_urls=data.get("context_urls"),
+            request_id=data.get("request_id"),
+        )
+
+    @classmethod
+    def from_envelope(cls, data: dict) -> tuple[NegotiationRequest, str]:
+        """
+        Parse from envelope structure { request: {...}, request_hash: "0x..." }.
+        Returns (NegotiationRequest, request_hash).
+        """
+        request_data = data.get("request", data)
+        request_hash = data.get("request_hash", "")
+        return cls.from_dict(request_data), request_hash
+
+
+@dataclass
+class NegotiationResponse:
+    """
+    Agent → User: pricing response.
+
+    If accepted, Agent fills in price/currency in terms.
+    Agent may adjust success_criteria but NOT quality_standards.
+
+    The response_hash is computed by the Agent and anchored on-chain by the Client
+    at createJobAndLock to prevent post-hoc tampering of agreed terms.
+    """
+
+    accepted: bool
+
+    terms: TermSpecification | None = None
+    estimated_completion_seconds: int | None = None
+    quote_expires_at: int | None = None
+
+    reason_code: str | None = None
+    reason: str | None = None
+    details: dict[str, object] | None = None
+
+    def to_dict(self) -> dict:
+        """Return the response content (without hash)."""
+        result: dict = {"accepted": self.accepted}
+        if self.terms is not None:
+            result["terms"] = self.terms.to_dict()
+        if self.estimated_completion_seconds is not None:
+            result["estimated_completion_seconds"] = self.estimated_completion_seconds
+        if self.quote_expires_at is not None:
+            result["quote_expires_at"] = self.quote_expires_at
+        if self.reason_code is not None:
+            result["reason_code"] = self.reason_code
+        if self.reason is not None:
+            result["reason"] = self.reason
+        if self.details is not None:
+            result["details"] = self.details
+        return result
+
+    def to_envelope(self) -> dict:
+        """
+        Return wrapped structure with response content and its hash.
+        The hash is of the response content, so they are at different layers.
+
+        {
+            "response": { accepted, terms, ... },
+            "response_hash": "0x..."
+        }
+        """
+        return {
+            "response": self.to_dict(),
+            "response_hash": self.compute_hash(),
+        }
+
+    def compute_hash(self) -> str:
+        """
+        Compute keccak256 hash of the canonical response for on-chain anchoring.
+        Returns hex string with 0x prefix.
+        """
+        from web3 import Web3
+
+        canonical_data: dict = {
+            "accepted": self.accepted,
+        }
+        if self.terms is not None:
+            canonical_data["terms"] = self.terms.to_dict()
+        if self.estimated_completion_seconds is not None:
+            canonical_data["estimated_completion_seconds"] = self.estimated_completion_seconds
+        if self.quote_expires_at is not None:
+            canonical_data["quote_expires_at"] = self.quote_expires_at
+
+        canonical_json = json.dumps(canonical_data, sort_keys=True, separators=(",", ":"))
+        h = Web3.keccak(text=canonical_json).hex()
+        return h if h.startswith("0x") else "0x" + h
+
+    @classmethod
+    def from_dict(cls, data: dict) -> NegotiationResponse:
+        terms = None
+        if data.get("terms"):
+            terms = TermSpecification.from_dict(data["terms"])
+        return cls(
+            accepted=data["accepted"],
+            terms=terms,
+            estimated_completion_seconds=data.get("estimated_completion_seconds"),
+            quote_expires_at=data.get("quote_expires_at"),
+            reason_code=data.get("reason_code"),
+            reason=data.get("reason"),
+            details=data.get("details"),
+        )
+
+    @classmethod
+    def from_envelope(cls, data: dict) -> tuple[NegotiationResponse, str]:
+        """
+        Parse from envelope structure { response: {...}, response_hash: "0x..." }.
+        Returns (NegotiationResponse, response_hash).
+        """
+        response_data = data.get("response", data)
+        response_hash = data.get("response_hash", "")
+        return cls.from_dict(response_data), response_hash
+
+
+@dataclass
+class NegotiationResult:
+    """Result of NegotiationHandler.negotiate() containing all components needed for the flow."""
+
+    request: dict
+    request_hash: str
+    response: dict
+    response_hash: str
+    negotiation_hash: str = ""
+    provider_sig: str = ""
+    chain_id: int | None = None
+    verifying_contract: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the negotiation was accepted."""
+        return self.response.get("accepted", False)
+
+    def to_dict(self) -> dict:
+        """Return the full negotiation envelope."""
+        result = {
+            "request": self.request,
+            "request_hash": self.request_hash,
+            "response": self.response,
+            "response_hash": self.response_hash,
+        }
+        if self.negotiation_hash:
+            result["negotiation_hash"] = self.negotiation_hash
+        if self.provider_sig:
+            result["provider_sig"] = self.provider_sig
+        if self.chain_id is not None:
+            result["chain_id"] = self.chain_id
+        if self.verifying_contract is not None:
+            result["verifying_contract"] = self.verifying_contract
+        return result
+
+
+def _sanitize_for_claim(s: str) -> str:
+    """
+    Sanitize a string for embedding in the UMA assertion claim.
+
+    Replaces [ and ] with ( and ) to prevent injection into the UMA claim's
+    section markers ([REQUEST], [RESPONSE], [VERIFY]). Also strips null bytes
+    and ASCII control characters (except tab/newline which are benign in JSON).
+    """
+    if not isinstance(s, str):
+        return str(s)
+    result = s.replace("[", "(").replace("]", ")")
+    # Strip ASCII control chars (0x00–0x1F) except tab (0x09) and newline (0x0A)
+    result = "".join(ch for ch in result if ord(ch) >= 0x20 or ch in ("\t", "\n"))
+    return result
+
+
+def _build_description_content(
+    negotiation_result: dict,
+    chain_id: int | None = None,
+    verifying_contract: str | None = None,
+) -> dict:
+    """
+    Extract and sanitize the signable content from a negotiation result dict.
+
+    Returns the content dict (without negotiation_hash and provider_sig) that
+    is used as input to keccak256 for the negotiation_hash.
+
+    When ``chain_id`` and/or ``verifying_contract`` are provided, they are
+    embedded in the content so the resulting signature is bound to a specific
+    chain + commerce contract. This prevents replaying the same ``provider_sig``
+    across EVM networks where the same provider key is configured.
+    """
+    response = negotiation_result.get("response", {})
+    request = negotiation_result.get("request", {})
+
+    if not response.get("accepted"):
+        raise ValueError("Cannot build description from a rejected negotiation")
+
+    response_terms = response.get("terms", {})
+    raw_price = response_terms.get("price")
+    currency = response_terms.get("currency")
+
+    if raw_price is None:
+        raise ValueError("Negotiation response missing price")
+    price = _normalize_atomic_price(raw_price)
+    if currency is None or currency == "":
+        raise ValueError("Negotiation response missing currency")
+
+    # Build terms section (quality fields only, no price/currency)
+    terms: dict = {
+        "deliverables": _sanitize_for_claim(response_terms.get("deliverables", "")),
+        "quality_standards": _sanitize_for_claim(response_terms.get("quality_standards", "")),
+    }
+    success_criteria = response_terms.get("success_criteria")
+    if success_criteria:
+        terms["success_criteria"] = [_sanitize_for_claim(c) for c in success_criteria]
+
+    negotiated_at = (
+        negotiation_result.get("negotiated_at")
+        or response.get("negotiated_at")
+        or int(time.time())
+    )
+    quote_expires_at = negotiation_result.get("quote_expires_at") or response.get(
+        "quote_expires_at"
+    )
+
+    content: dict = {
+        "version": 1,
+        "negotiated_at": negotiated_at,
+        "task": _sanitize_for_claim(request.get("task_description", "")),
+        "terms": terms,
+        "price": price,
+        "currency": currency,
+    }
+    if quote_expires_at is not None:
+        content["quote_expires_at"] = quote_expires_at
+    if chain_id is not None:
+        content["chain_id"] = chain_id
+    if verifying_contract is not None:
+        from web3 import Web3
+
+        content["verifying_contract"] = Web3.to_checksum_address(verifying_contract)
+
+    return content
+
+
+def build_job_description(
+    negotiation_result: dict, max_length: int = MAX_DESCRIPTION_BYTES
+) -> str:
+    """
+    Build a compact JSON description string for createJob() from a negotiation result.
+
+    The description is stored on-chain in Job.description and is embedded verbatim
+    in the UMA assertion claim so dispute voters can see the agreed terms directly.
+
+    The provider_sig (if present) allows anyone to verify the provider agreed to
+    these exact terms: ecrecover(negotiation_hash, provider_sig) == job.provider.
+
+    Args:
+        negotiation_result: Dict from NegotiationResult.to_dict() or the HTTP
+                            /negotiate endpoint response.
+        max_length: Maximum byte length of the output string (default
+                    MAX_DESCRIPTION_BYTES). If exceeded, raises
+                    DescriptionTooLongError — truncating here would change the
+                    signed content and break provider_sig verification.
+
+    Returns:
+        Compact JSON string suitable for createJob(description=...).
+
+    Raises:
+        ValueError: If the negotiation was not accepted or required fields are missing.
+        DescriptionTooLongError: If the assembled description exceeds max_length.
+    """
+    # Propagate chain_id / verifying_contract from the result so the on-chain
+    # description string contains the SAME fields that were keccak'd to produce
+    # negotiation_hash. Without this, downstream verifiers that re-derive the
+    # hash from the on-chain JSON would always get a different value than what
+    # provider_sig actually signed.
+    content = _build_description_content(
+        negotiation_result,
+        chain_id=negotiation_result.get("chain_id"),
+        verifying_contract=negotiation_result.get("verifying_contract"),
+    )
+
+    # Append negotiation_hash and provider_sig from the result
+    negotiation_hash = negotiation_result.get("negotiation_hash", "")
+    provider_sig = negotiation_result.get("provider_sig", "")
+    if negotiation_hash:
+        content["negotiation_hash"] = negotiation_hash
+    if provider_sig:
+        content["provider_sig"] = provider_sig
+
+    description = json.dumps(content, sort_keys=True, separators=(",", ":"))
+
+    if len(description) > max_length:
+        raise DescriptionTooLongError(
+            f"on-chain description is {len(description)} bytes, exceeds "
+            f"max_length={max_length}; shorten task_description / terms. "
+            f"Truncating would invalidate negotiation_hash / provider_sig."
+        )
+
+    return description
+
+
+def parse_job_description(description: str) -> JobDescription | None:
+    """Parse a structured on-chain job description (schema v1+).
+
+    Returns a ``JobDescription`` if the description is a valid structured JSON,
+    or ``None`` for plain-text / unstructured descriptions.
+
+    Args:
+        description: The job.description string from on-chain.
+    """
+    from .schema import JobDescription
+
+    return JobDescription.from_str(description)
+
+
+class NegotiationHandler:
+    """
+    Ready-to-use negotiation handler for agents.
+
+    Encapsulates the common negotiation logic:
+    - Validates incoming requests
+    - Checks service type support
+    - Validates required fields (quality_standards)
+    - Returns properly structured response with hashes
+    - Signs the negotiation hash with the agent's wallet (if wallet_provider set)
+
+    Example:
+        handler = NegotiationHandler(
+            service_price="20000000000000000000",  # 20 tokens (18 decimals)
+            currency="0x0000000000000000000000000000000000000000",
+            wallet_provider=wallet,               # enables provider_sig
+            quote_ttl_seconds=900,                # quote valid for 15 minutes
+        )
+
+        # Or auto-fetch currency from contract:
+        handler = NegotiationHandler.from_erc8183_client(
+            erc8183_client=erc8183_client,
+            service_price="20000000000000000000",
+        )
+
+        # In your /negotiate endpoint:
+        result = handler.negotiate(request_data)
+        return result.to_dict()
+    """
+
+    MAX_QUOTE_TTL_SECONDS = 900  # 15 minutes — bounds the lifetime of provider_sig
+
+    def __init__(
+        self,
+        service_price: str | int,
+        currency: str,
+        estimated_completion_seconds: int = 120,
+        require_quality_standards: bool = True,
+        wallet_provider: MessageSigner | None = None,
+        quote_ttl_seconds: int = 300,
+        chain_id: int | None = None,
+        verifying_contract: str | None = None,
+    ):
+        """
+        Initialize the negotiation handler.
+
+        Args:
+            service_price: Price in token smallest unit
+                           (e.g., "20000000000000000000" for 20 tokens)
+            currency: BEP20 token contract address
+            estimated_completion_seconds: Estimated time to complete the service
+            require_quality_standards: Whether to require quality_standards in request
+            wallet_provider: Wallet for signing negotiation_hash. When set, the
+                             NegotiationResult will include provider_sig allowing
+                             clients to verify the agent agreed to the terms.
+            quote_ttl_seconds: How long the price quote is valid (default: 300s).
+                               Capped at MAX_QUOTE_TTL_SECONDS so leaked / replayed
+                               provider_sig values cannot accumulate value over time.
+            chain_id: When set, embedded in the signed content so the signature
+                      is bound to a specific chain. Prevents cross-chain replay
+                      when the same provider key is configured on multiple EVMs.
+            verifying_contract: When set, embedded in the signed content to bind
+                                the signature to a specific commerce contract.
+                                Use :meth:`from_erc8183_client` to auto-populate
+                                both fields from a live ERC-8183 client.
+        """
+        if not isinstance(quote_ttl_seconds, int) or isinstance(quote_ttl_seconds, bool):
+            raise ValueError(
+                f"quote_ttl_seconds must be int, got {type(quote_ttl_seconds).__name__}"
+            )
+        if quote_ttl_seconds <= 0 or quote_ttl_seconds > self.MAX_QUOTE_TTL_SECONDS:
+            raise ValueError(
+                f"quote_ttl_seconds must be in (0, {self.MAX_QUOTE_TTL_SECONDS}], "
+                f"got {quote_ttl_seconds}"
+            )
+
+        self._service_price = _normalize_atomic_price(service_price, field_name="service_price")
+        self._currency = currency
+        self._estimated_completion = estimated_completion_seconds
+        self._require_quality_standards = require_quality_standards
+        self._wallet_provider = wallet_provider
+        self._quote_ttl_seconds = quote_ttl_seconds
+        self._chain_id = chain_id
+        self._verifying_contract = verifying_contract
+        self._multi_asset = False
+        self._erc8183_client: ERC8183Client | None = None
+        self._configured_offers: dict[str, tuple[PaymentAsset, str]] = {}
+        self._active_offers: dict[str, tuple[PaymentAsset, str]] = {}
+        # Latched, because a deployment does not grow the selector under a
+        # running seller; re-probing would spend one reverting call per
+        # negotiation. An upgraded stack is picked up on restart.
+        self._single_token_deployment = False
+
+        if wallet_provider is not None and chain_id is None:
+            logger.warning(
+                "[NegotiationHandler] wallet_provider is set but chain_id is None; "
+                "provider_sig will not be bound to a specific chain. "
+                "Pass chain_id (or use from_erc8183_client) to prevent cross-chain replay."
+            )
+
+    @classmethod
+    def from_erc8183_client(
+        cls,
+        erc8183_client: ERC8183Client,
+        service_price: str | int,
+        estimated_completion_seconds: int = 120,
+        require_quality_standards: bool = True,
+        wallet_provider: MessageSigner | None = None,
+        quote_ttl_seconds: int = 300,
+    ) -> NegotiationHandler:
+        """
+        Create a NegotiationHandler with currency fetched from the ERC-8183 contract.
+
+        Args:
+            erc8183_client: ERC8183Client instance for on-chain queries
+            service_price: Price in token smallest unit
+            estimated_completion_seconds: Estimated completion time
+            require_quality_standards: Whether to require quality_standards
+            wallet_provider: Wallet for signing negotiation results
+            quote_ttl_seconds: Quote validity period in seconds
+
+        Returns:
+            NegotiationHandler with currency from contract
+
+        Example:
+            from bitgold_agent import ERC8183Client, EVMWalletProvider, NegotiationHandler
+
+            wallet = EVMWalletProvider(password="...", private_key=os.environ["PRIVATE_KEY"])
+            erc8183 = ERC8183Client(wallet, network="bitgold-testnet")
+
+            handler = NegotiationHandler.from_erc8183_client(
+                erc8183_client=erc8183,
+                service_price=os.environ["ERC8183_SERVICE_PRICE"],
+            )
+        """
+        currency = erc8183_client.payment_token
+
+        return cls(
+            service_price=service_price,
+            currency=currency,
+            estimated_completion_seconds=estimated_completion_seconds,
+            require_quality_standards=require_quality_standards,
+            wallet_provider=wallet_provider,
+            quote_ttl_seconds=quote_ttl_seconds,
+            chain_id=erc8183_client.network.chain_id,
+            verifying_contract=erc8183_client.commerce.address,
+        )
+
+    @classmethod
+    def from_erc8183_client_multi(
+        cls,
+        erc8183_client: ERC8183Client,
+        service_prices: Mapping[AssetId | str, str | int],
+        estimated_completion_seconds: int = 120,
+        require_quality_standards: bool = True,
+        wallet_provider: MessageSigner | None = None,
+        quote_ttl_seconds: int = 300,
+    ) -> NegotiationHandler:
+        """Build a catalog-bound multi-asset seller and load its active snapshot.
+
+        Mapping keys are canonical :class:`AssetId` values, never UI symbols or
+        token addresses. Values are non-negative atomic-unit integer strings.
+        Commerce support is checked immediately and can be refreshed later. A
+        deployment with no multi-token surface narrows to the single token it
+        can escrow instead of failing to build — see
+        :attr:`is_single_token_deployment`.
+        """
+        if not service_prices:
+            raise ValueError("service_prices must contain at least one canonical AssetId")
+
+        chain_id = erc8183_client.network.chain_id
+        configured: dict[str, tuple[PaymentAsset, str]] = {}
+        seen_ids: set[AssetId] = set()
+        for raw_asset_id, atomic_price in service_prices.items():
+            asset_id = parse_asset_id(raw_asset_id)
+            if asset_id in seen_ids:
+                raise ValueError(f"duplicate service price for AssetId {asset_id.value}")
+            normalized_price = _normalize_atomic_price(
+                atomic_price, field_name=f"service price for {asset_id.value}"
+            )
+            asset = get_asset(chain_id, asset_id)
+            configured[asset.address.lower()] = (asset, normalized_price)
+            seen_ids.add(asset_id)
+
+        defaults = tuple(asset for asset in list_assets(chain_id) if asset.is_default)
+        if len(defaults) != 1:
+            raise ValueError(
+                f"chain_id={chain_id} asset catalog must contain exactly one default asset"
+            )
+        default_currency = defaults[0].address
+        handler = cls(
+            service_price="0",
+            currency=default_currency,
+            estimated_completion_seconds=estimated_completion_seconds,
+            require_quality_standards=require_quality_standards,
+            wallet_provider=wallet_provider,
+            quote_ttl_seconds=quote_ttl_seconds,
+            chain_id=chain_id,
+            verifying_contract=erc8183_client.commerce.address,
+        )
+        handler._multi_asset = True
+        handler._erc8183_client = erc8183_client
+        handler._configured_offers = configured
+        handler.refresh_payment_tokens()
+        return handler
+
+    def refresh_payment_tokens(self) -> tuple[AssetId, ...]:
+        """Refresh active Commerce offers, clearing stale state on any failure."""
+        client = self._erc8183_client
+        if not self._multi_asset or client is None:
+            return ()
+
+        self._active_offers = {}
+        if self._single_token_deployment:
+            return self._refresh_legacy_offer(client)
+
+        refreshed: dict[str, tuple[PaymentAsset, str]] = {}
+        try:
+            for address, offer in self._configured_offers.items():
+                if client.is_payment_token_supported(offer[0].address):
+                    refreshed[address] = offer
+        except Exception as exc:
+            if _lacks_multi_token_surface(exc):
+                self._single_token_deployment = True
+                return self._refresh_legacy_offer(client)
+            raise RuntimeError("payment-token refresh failed; active offers cleared") from exc
+        self._active_offers = refreshed
+        return tuple(offer[0].asset_id for offer in refreshed.values())
+
+    def _refresh_legacy_offer(self, client: ERC8183Client) -> tuple[AssetId, ...]:
+        """Narrow the configured catalog to the one token a single-token
+        deployment can escrow.
+
+        Assets the contract cannot hold stay inactive, so :meth:`negotiate`
+        refuses them by name rather than quoting a price no job could ever be
+        funded in — and the seller's default asset keeps working meanwhile.
+        """
+        try:
+            legacy_token = client.payment_token.lower()
+        except Exception as exc:
+            raise RuntimeError("payment-token refresh failed; active offers cleared") from exc
+        offer = self._configured_offers.get(legacy_token)
+        if offer is None:
+            return ()
+        self._active_offers = {legacy_token: offer}
+        return (offer[0].asset_id,)
+
+    @property
+    def is_single_token_deployment(self) -> bool:
+        """True once the bound Commerce deployment proved it has no multi-token
+        surface. Callers use this to tell an operator that the stack — not the
+        configuration — is what narrowed the offered assets."""
+        return self._single_token_deployment
+
+    def _supported_details(self) -> dict[str, object]:
+        if not self._multi_asset:
+            return {"supported_assets": []}
+        return {
+            "supported_assets": [offer[0].asset_id.value for offer in self._active_offers.values()]
+        }
+
+    @staticmethod
+    def _currencies_equal(left: str, right: str) -> bool:
+        try:
+            return Web3.to_checksum_address(left) == Web3.to_checksum_address(right)
+        except (TypeError, ValueError):
+            return left == right
+
+    def _select_offer(self, requested_currency: str | None) -> tuple[str, str] | None:
+        if not self._multi_asset:
+            if requested_currency is not None and not self._currencies_equal(
+                requested_currency, self._currency
+            ):
+                return None
+            return self._currency, self._service_price
+
+        if requested_currency is not None:
+            try:
+                selected_address = Web3.to_checksum_address(requested_currency)
+            except (TypeError, ValueError):
+                return None
+            offer = self._active_offers.get(selected_address.lower())
+            if offer is None:
+                return None
+            return offer[0].address, offer[1]
+
+        try:
+            default_address = Web3.to_checksum_address(self._currency).lower()
+        except (TypeError, ValueError):
+            return None
+        default_offer = self._active_offers.get(default_address)
+        if default_offer is not None:
+            return default_offer[0].address, default_offer[1]
+        if default_address in self._configured_offers:
+            return None
+        if not self._active_offers:
+            return None
+        first_active = next(iter(self._active_offers.values()))
+        return first_active[0].address, first_active[1]
+
+    @staticmethod
+    def _ensure_hex_prefix(h: str) -> str:
+        """Ensure hash has 0x prefix."""
+        return h if h.startswith("0x") else "0x" + h
+
+    def negotiate(
+        self,
+        request_data: dict,
+        *,
+        price: str | int | None = None,
+        estimated_completion_seconds: int | None = None,
+    ) -> NegotiationResult:
+        """
+        Process a negotiation request and return the result.
+
+        If wallet_provider is set, the result includes:
+          - negotiation_hash: keccak256 of the canonical description content
+          - provider_sig: EIP-191 signature over negotiation_hash
+
+        Args:
+            request_data: The incoming request dict (task_description, terms, ...)
+            price: Optional per-request price (token smallest-unit uint256
+                string or safe integer) overriding the construction-time
+                ``service_price`` for this call only. Available only to legacy
+                single-token handlers; multi-asset handlers must use their
+                per-asset ``service_prices``. Must be seller-controlled (e.g.
+                an effort estimate), NOT echoed from untrusted client input.
+            estimated_completion_seconds: Optional per-request ETA override.
+
+        Returns:
+            NegotiationResult with request, request_hash, response, response_hash,
+            and (if wallet configured) negotiation_hash + provider_sig.
+        """
+        try:
+            req = NegotiationRequest.from_dict(request_data)
+        except (KeyError, TypeError, ValueError) as e:
+            return self._reject(
+                request_data=request_data,
+                reason_code=ReasonCode.AMBIGUOUS_TERMS,
+                reason=f"Invalid request format: {e}",
+            )
+
+        request_hash = self._ensure_hex_prefix(req.compute_hash())
+
+        if self._require_quality_standards and not req.terms.quality_standards:
+            return self._reject(
+                request_data=req.to_dict(),
+                request_hash=request_hash,
+                reason_code=ReasonCode.AMBIGUOUS_TERMS,
+                reason="quality_standards is required in terms.",
+            )
+
+        if self._multi_asset:
+            try:
+                self.refresh_payment_tokens()
+            except RuntimeError:
+                return self._reject(
+                    request_data=req.to_dict(),
+                    request_hash=request_hash,
+                    reason_code=ReasonCode.UNSUPPORTED,
+                    reason="Payment-token availability could not be verified",
+                    details=self._supported_details(),
+                )
+            if price is not None:
+                return self._reject(
+                    request_data=req.to_dict(),
+                    request_hash=request_hash,
+                    reason_code=ReasonCode.AMBIGUOUS_TERMS,
+                    reason="A single price override is not valid for multi-asset offers",
+                )
+
+        offer = self._select_offer(req.terms.currency)
+        if offer is None:
+            return self._reject(
+                request_data=req.to_dict(),
+                request_hash=request_hash,
+                reason_code=ReasonCode.UNSUPPORTED,
+                reason="Requested payment token is unavailable",
+                details=self._supported_details(),
+            )
+        selected_currency, configured_price = offer
+
+        # Per-request overrides fall back to the construction-time defaults.
+        if price is not None:
+            if isinstance(price, bool) or not isinstance(price, (str, int)):
+                return self._reject(
+                    request_data=req.to_dict(),
+                    request_hash=request_hash,
+                    reason_code=ReasonCode.AMBIGUOUS_TERMS,
+                    reason=f"price must be a non-negative integer string, got {price!r}",
+                )
+            try:
+                normalized_override = _normalize_atomic_price(price)
+            except ValueError:
+                return self._reject(
+                    request_data=req.to_dict(),
+                    request_hash=request_hash,
+                    reason_code=ReasonCode.AMBIGUOUS_TERMS,
+                    reason=f"price must be a non-negative integer string, got {price!r}",
+                )
+        else:
+            normalized_override = None
+        effective_price = (
+            normalized_override if normalized_override is not None else configured_price
+        )
+        effective_eta = (
+            estimated_completion_seconds
+            if estimated_completion_seconds is not None
+            else self._estimated_completion
+        )
+
+        now = int(time.time())
+        quote_expires_at = now + self._quote_ttl_seconds
+
+        response_terms = TermSpecification(
+            deliverables=req.terms.deliverables,
+            quality_standards=req.terms.quality_standards,
+            success_criteria=req.terms.success_criteria,
+            price=effective_price,
+            currency=selected_currency,
+        )
+
+        response = NegotiationResponse(
+            accepted=True,
+            terms=response_terms,
+            estimated_completion_seconds=effective_eta,
+            quote_expires_at=quote_expires_at,
+        )
+
+        response_hash = self._ensure_hex_prefix(response.compute_hash())
+
+        # Build partial result to compute negotiation_hash
+        partial_result = NegotiationResult(
+            request=req.to_dict(),
+            request_hash=request_hash,
+            response=response.to_dict(),
+            response_hash=response_hash,
+        )
+        partial_dict = partial_result.to_dict()
+        partial_dict["negotiated_at"] = now
+
+        negotiation_hash = ""
+        provider_sig = ""
+
+        if self._wallet_provider:
+            try:
+                from web3 import Web3
+
+                content = _build_description_content(
+                    partial_dict,
+                    chain_id=self._chain_id,
+                    verifying_contract=self._verifying_contract,
+                )
+                canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+                h = Web3.keccak(text=canonical).hex()
+                negotiation_hash = h if h.startswith("0x") else "0x" + h
+
+                sig_result = self._wallet_provider.sign_message(negotiation_hash)
+                sig_bytes = sig_result.get("signature", b"")
+                provider_sig = (
+                    sig_bytes.hex()
+                    if isinstance(sig_bytes, (bytes, bytearray))
+                    else str(sig_bytes)
+                )
+                if not provider_sig:
+                    raise ValueError("wallet provider returned an empty signature")
+                if provider_sig and not provider_sig.startswith("0x"):
+                    provider_sig = "0x" + provider_sig
+            except Exception as e:
+                logger.error("[NegotiationHandler] quote signing failed: %s", e)
+                raise QuoteSigningError(f"quote signing failed: {e}") from e
+
+        # Store negotiated_at in the response dict for build_job_description
+        response_dict = response.to_dict()
+        response_dict["negotiated_at"] = now
+
+        # Echo chain_id / verifying_contract into the result so build_job_description
+        # writes them into the on-chain JSON. Without this, the on-chain description
+        # would lack the fields that negotiation_hash was computed over, and
+        # downstream verifiers couldn't reconstruct the signed digest.
+        bound_chain_id = self._chain_id if negotiation_hash else None
+        bound_contract = self._verifying_contract if negotiation_hash else None
+
+        result = NegotiationResult(
+            request=req.to_dict(),
+            request_hash=request_hash,
+            response=response_dict,
+            response_hash=response_hash,
+            negotiation_hash=negotiation_hash,
+            provider_sig=provider_sig,
+            chain_id=bound_chain_id,
+            verifying_contract=bound_contract,
+        )
+
+        # Reject up front if the on-chain description would exceed the cap.
+        # Measuring the fully-assembled string (incl. negotiation_hash +
+        # provider_sig) means we never hand back a quote the client cannot
+        # turn into a job, and never silently truncate a signed record.
+        try:
+            build_job_description(result.to_dict())
+        except DescriptionTooLongError:
+            return self._reject(
+                request_data=req.to_dict(),
+                request_hash=request_hash,
+                reason_code=ReasonCode.TASK_TOO_LONG,
+                reason=(
+                    "task_description + terms exceed the on-chain description "
+                    f"size limit ({MAX_DESCRIPTION_BYTES} bytes)"
+                ),
+            )
+
+        return result
+
+    def _reject(
+        self,
+        request_data: dict,
+        reason_code: str,
+        reason: str,
+        request_hash: str = "",
+        details: dict[str, object] | None = None,
+    ) -> NegotiationResult:
+        """Build a rejection response."""
+        response = NegotiationResponse(
+            accepted=False,
+            reason_code=reason_code,
+            reason=reason,
+            details=details,
+        )
+        response_hash = self._ensure_hex_prefix(response.compute_hash()) if request_hash else ""
+        return NegotiationResult(
+            request=request_data,
+            request_hash=request_hash,
+            response=response.to_dict(),
+            response_hash=response_hash,
+        )

@@ -1,0 +1,174 @@
+import { readFileSync } from "node:fs";
+import { expect, test } from "vitest";
+import {
+  changelogLogArgs,
+  freezeWorkspaceDeps,
+  npmPublishArgs,
+  publishOne,
+  refreshLockfile,
+  releaseRange,
+  releaseTag,
+  resolveVersion,
+  waitForPackage,
+} from "./release.ts";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const publishWorkflow = readFileSync(
+  new URL("../../.github/workflows/npm-publish.yml", import.meta.url),
+  "utf8",
+);
+const productionJob = publishWorkflow.slice(
+  publishWorkflow.indexOf("\n  production:"),
+);
+
+test("release lock refresh routes installer output away from machine stdout", () => {
+  const reported: string[] = [];
+  refreshLockfile(
+    () => ({
+      exitCode: 0,
+      stdout: encoder.encode("Progress: resolved 1\nSaved pnpm-lock.yaml\n"),
+      stderr: encoder.encode("warning from installer\n"),
+    }),
+    (chunk) => {
+      if (chunk.byteLength > 0) reported.push(decoder.decode(chunk));
+    },
+  );
+
+  expect(reported.join("")).toBe(
+    "Progress: resolved 1\nSaved pnpm-lock.yaml\nwarning from installer\n",
+  );
+});
+
+test("release freeze converts every workspace dependency form", () => {
+  const pkg = {
+    dependencies: {
+      "@bitgold_agent/deploy-core": "workspace:*",
+    },
+    peerDependencies: {
+      "@bitgold_agent/deploy-provider-aws": "workspace:^",
+      external: "^1.0.0",
+    },
+  };
+
+  freezeWorkspaceDeps(pkg, "0.3.1");
+
+  expect(pkg).toEqual({
+    dependencies: {
+      "@bitgold_agent/deploy-core": "^0.3.1",
+    },
+    peerDependencies: {
+      "@bitgold_agent/deploy-provider-aws": "^0.3.1",
+      external: "^1.0.0",
+    },
+  });
+});
+
+test("release supports publishing the current stable version", () => {
+  expect(resolveVersion("0.5.0", "current")).toBe("0.5.0");
+  expect(resolveVersion("0.5.0", "patch")).toBe("0.5.1");
+  expect(resolveVersion("0.5.0", "minor")).toBe("0.6.0");
+  expect(resolveVersion("0.5.0", "major")).toBe("1.0.0");
+});
+
+test("release rejects prerelease manifests and unknown version selections", () => {
+  expect(() => resolveVersion("0.5.0-alpha.1", "current")).toThrow(
+    "expected X.Y.Z",
+  );
+  expect(() => resolveVersion("0.5.0", "alpha")).toThrow(
+    "current|patch|minor|major",
+  );
+});
+
+test("release tags carry the full npm coordinate", () => {
+  expect(releaseTag("0.5.0")).toBe("@bitgold-agent/sdk@v0.5.0");
+});
+
+test("release changelog ranges from the previous sdk tag, never another component's", () => {
+  expect(releaseRange("@bitgold-agent/sdk@v0.5.0")).toBe(
+    "@bitgold-agent/sdk@v0.5.0..HEAD",
+  );
+  // First release: full history, NOT the latest Python (bitgold_agent-v*) tag —
+  // an unrelated tag would silently truncate the range.
+  expect(releaseRange("")).toBe("HEAD");
+});
+
+test("release changelog scopes to typescript/ and shared abis/ from the repo root", () => {
+  const args = changelogLogArgs("@bitgold-agent/sdk@v0.5.0..HEAD");
+  expect(args.slice(-3)).toEqual(["--", ":(top)typescript/", ":(top)abis/"]);
+  expect(args).toContain("--no-merges");
+  expect(args).toContain("@bitgold-agent/sdk@v0.5.0..HEAD");
+});
+
+test("release publishes production explicitly under latest", () => {
+  expect(npmPublishArgs("latest")).toEqual([
+    "npm",
+    "publish",
+    "--access",
+    "public",
+    "--tag",
+    "latest",
+  ]);
+});
+
+test("production release versions the package before building it", () => {
+  const prepare = productionJob.indexOf("- name: Prepare or resume version");
+  const build = productionJob.indexOf("- name: Check source and build");
+
+  expect(prepare).toBeGreaterThan(-1);
+  expect(build).toBeGreaterThan(prepare);
+});
+
+test("production release verifies built_with from the installable tarball", () => {
+  expect(productionJob).toContain("npm pack --json");
+  expect(productionJob).toContain("getBuiltWithValue()");
+});
+
+test("publish waits for npm visibility before continuing", () => {
+  let checks = 0;
+  const sleeps: number[] = [];
+  waitForPackage("@bitgold_agent/example", "0.3.0", {
+    attempts: 4,
+    delayMs: 25,
+    exists: () => ++checks === 3,
+    sleep: (milliseconds) => sleeps.push(milliseconds),
+    report: () => {},
+  });
+
+  expect(checks).toBe(3);
+  expect(sleeps).toEqual([25, 25]);
+});
+
+test("publish waits only after npm publish succeeds", () => {
+  const events: string[] = [];
+  publishOne(
+    {
+      dir: "packages/example",
+      name: "@bitgold_agent/example",
+      pkg: { version: "0.3.1" },
+    },
+    false,
+    {
+      exists: () => false,
+      run: () => {
+        events.push("publish");
+        return 0;
+      },
+      wait: (name, version) => events.push(`wait:${name}@${version}`),
+    },
+  );
+
+  expect(events).toEqual(["publish", "wait:@bitgold_agent/example@0.3.1"]);
+});
+
+test("publish visibility timeout blocks dependents and tagging", () => {
+  expect(() =>
+    waitForPackage("@bitgold_agent/missing", "0.3.0", {
+      attempts: 2,
+      delayMs: 0,
+      exists: () => false,
+      sleep: () => {},
+      report: () => {},
+    }),
+  ).toThrow("refusing to publish dependents or create the tag");
+});

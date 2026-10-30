@@ -1,0 +1,231 @@
+"""Thin wrapper around ``OptimisticPolicy`` (ERC-8183 reference policy).
+
+Surface:
+
+- ``dispute(jobId)``      — client-only, within dispute window.
+- ``vote_reject(jobId)``  — whitelisted voter, post-dispute.
+- Read helpers for window state, quorum, voter status, etc.
+
+Note: the contract's "silence approves" design means voters can ONLY reject.
+There is no ``voteApprove`` on-chain; jobs without dispute auto-approve when
+``submittedAt + disputeWindow`` elapses.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from web3 import Web3
+from web3.contract import Contract
+
+from ..core.abis import load_abi
+from ..core.contract_mixin import ContractClientMixin
+from ..exceptions import NetworkError, RpcRangeLimitError
+from ..wallets.intents import ERC8183_DISPUTE, ERC8183_VOTE_REJECT, Intent
+from ..wallets.wallet_provider import WalletProvider
+from .types import Verdict
+
+logger = logging.getLogger(__name__)
+
+
+def _load_abi() -> list:
+    return load_abi("OptimisticPolicy.json")
+
+
+class PolicyClient(ContractClientMixin):
+    """Low-level client for ``OptimisticPolicy``."""
+
+    def __init__(
+        self,
+        web3: Web3,
+        contract_address: str,
+        wallet_provider: WalletProvider | None = None,
+        *,
+        abi: list | None = None,
+        paymaster: Any = None,
+    ) -> None:
+        self.w3 = web3
+        self.address = Web3.to_checksum_address(contract_address)
+        self.contract: Contract = self.w3.eth.contract(
+            address=self.address, abi=abi or _load_abi()
+        )
+        self._wallet_provider = wallet_provider
+        self._account = wallet_provider.address if wallet_provider is not None else None
+        # Optional gas sponsorship for the intent write path (read by the
+        # ContractClientMixin executor seam). None = self-pay.
+        self._paymaster = paymaster
+
+    # ----------------------------------------------------------------- writes
+
+    def dispute(self, job_id: int) -> dict[str, Any]:
+        """Client raises a dispute. MUST be within dispute window."""
+        fn = self.contract.functions.dispute(job_id)
+        return self._execute_intent(
+            Intent(
+                name=ERC8183_DISPUTE,
+                kwargs={"job_id": job_id},
+                call=fn,
+                description="dispute job",
+            )
+        )
+
+    def vote_reject(self, job_id: int) -> dict[str, Any]:
+        """Whitelisted voter casts a reject vote (one per voter per job)."""
+        fn = self.contract.functions.voteReject(job_id)
+        return self._execute_intent(
+            Intent(
+                name=ERC8183_VOTE_REJECT,
+                kwargs={"job_id": job_id},
+                call=fn,
+                description="vote reject",
+            )
+        )
+
+    # ------------------------------------------------------------------ views
+
+    def check(self, job_id: int, evidence: bytes = b"") -> tuple[Verdict, bytes]:
+        """Simulate the verdict the Router would see right now."""
+        verdict_int, reason = self._call_with_retry(
+            self.contract.functions.check(job_id, evidence)
+        )
+        return Verdict(verdict_int), reason
+
+    def submitted_at(self, job_id: int) -> int:
+        return self._call_with_retry(self.contract.functions.submittedAt(job_id))
+
+    def disputed(self, job_id: int) -> bool:
+        return self._call_with_retry(self.contract.functions.disputed(job_id))
+
+    def reject_votes(self, job_id: int) -> int:
+        return self._call_with_retry(self.contract.functions.rejectVotes(job_id))
+
+    def has_voted(self, job_id: int, voter: str) -> bool:
+        return self._call_with_retry(
+            self.contract.functions.hasVoted(job_id, Web3.to_checksum_address(voter))
+        )
+
+    def is_voter(self, voter: str) -> bool:
+        return self._call_with_retry(
+            self.contract.functions.isVoter(Web3.to_checksum_address(voter))
+        )
+
+    def get_deliverable_url(
+        self, job_id: int, *, hint_block: int | None = None, require_log: bool = False
+    ) -> str | None:
+        """Return the ``deliverable_url`` for a submitted job.
+
+        Reads the ``JobInitialised`` event emitted by ``onSubmitted`` and
+        parses ``optParams`` (JSON bytes) to extract ``deliverable_url``.
+        Returns it only when it is a non-empty string; ``None`` when the event
+        is not found or carries no usable ``deliverable_url``, which is up to
+        the provider. A failed log query is not proof of absence: it raises
+        :class:`~bitgold_agent.exceptions.RpcRangeLimitError` for a rate/range limit
+        (``-32005``) and :class:`~bitgold_agent.exceptions.NetworkError` otherwise,
+        both retryable. With ``require_log``, finding no event raises
+        :class:`~bitgold_agent.exceptions.NetworkError` too: the policy emits it on
+        every submission, so for a job known to be submitted an empty result
+        means the RPC returned an incomplete one.
+
+        Prefer calling ``ERC8183Client.get_deliverable_url`` which auto-resolves
+        ``hint_block`` from the job's ``submittedAt``.  If called directly
+        without ``hint_block`` a 1 000-block fallback window is used.
+        """
+        _TIGHT = 10  # blocks either side when hint is known
+        _FALLBACK = 1_000
+
+        try:
+            current_block = self.w3.eth.block_number
+        except Exception:
+            current_block = None
+
+        if hint_block is not None:
+            from_block = max(0, hint_block - _TIGHT)
+            to_block = hint_block + _TIGHT
+        elif current_block is not None:
+            from_block = max(0, current_block - _FALLBACK)
+            to_block = "latest"
+        else:
+            raise RpcRangeLimitError("Cannot bound deliverable query without a block height")
+
+        try:
+            logs = self.contract.events.JobInitialised().get_logs(
+                from_block=from_block,
+                to_block=to_block,
+                argument_filters={"jobId": job_id},
+            )
+        except Exception as exc:
+            err = str(exc)
+            if "-32005" in err or "limit exceeded" in err.lower():
+                # Rate/range-limited RPC is NOT "event not found" — surface a
+                # typed retryable error instead of a None the caller would
+                # misread as a genuinely absent deliverable.
+                raise RpcRangeLimitError(
+                    f"JobInitialised scan for job {job_id} hit the RPC "
+                    f"range/rate limit; retry later"
+                ) from exc
+            raise NetworkError(
+                f"JobInitialised scan for job {job_id} failed; retry later"
+            ) from exc
+
+        if not logs:
+            if require_log:
+                raise NetworkError(
+                    f"no JobInitialised log for submitted job {job_id} in blocks "
+                    f"{from_block}..{to_block}: the RPC returned an incomplete result; "
+                    "retry later"
+                )
+            return None
+
+        raw: bytes = logs[0]["args"].get("optParams", b"")
+        if not raw:
+            return None
+        try:
+            params = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            logger.warning("[PolicyClient] get_deliverable_url(%s) parse failed: %s", job_id, exc)
+            return None
+        url = params.get("deliverable_url") if isinstance(params, dict) else None
+        return url if isinstance(url, str) and url else None
+
+    def dispute_window(self) -> int:
+        return self._call_with_retry(self.contract.functions.disputeWindow())
+
+    def vote_quorum(self) -> int:
+        return self._call_with_retry(self.contract.functions.voteQuorum())
+
+    def dispute_quorum_snapshot(self, job_id: int) -> int:
+        """``voteQuorum`` value snapshotted at ``dispute()`` time (audit L08).
+
+        Returns ``0`` if the job has never been disputed. After ``dispute``
+        the snapshot is the threshold ``check`` will use, even if an admin
+        later calls ``setQuorum`` — protects pending disputes from
+        retroactive admin adjustments."""
+        return self._call_with_retry(self.contract.functions.disputeQuorumSnapshot(job_id))
+
+    def active_voter_count(self) -> int:
+        return self._call_with_retry(self.contract.functions.activeVoterCount())
+
+    def admin(self) -> str:
+        return self._call_with_retry(self.contract.functions.admin())
+
+    def commerce(self) -> str:
+        return self._call_with_retry(self.contract.functions.commerce())
+
+    def router(self) -> str:
+        return self._call_with_retry(self.contract.functions.router())
+
+    # --------------------------------------------------- admin writes (owner)
+
+    def add_voter(self, voter: str) -> dict[str, Any]:
+        fn = self.contract.functions.addVoter(Web3.to_checksum_address(voter))
+        return self._send_tx(fn)
+
+    def remove_voter(self, voter: str) -> dict[str, Any]:
+        fn = self.contract.functions.removeVoter(Web3.to_checksum_address(voter))
+        return self._send_tx(fn)
+
+    def set_quorum(self, new_quorum: int) -> dict[str, Any]:
+        fn = self.contract.functions.setQuorum(new_quorum)
+        return self._send_tx(fn)

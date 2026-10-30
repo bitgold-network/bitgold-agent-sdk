@@ -1,0 +1,11 @@
+Bitgold Agent SDK
+=================
+
+Copyright (c) 2026 Bitgold Network contributors.
+
+This product derives from the BNBAgent SDK (https://github.com/bnb-chain/bnbagent-sdk),
+Copyright (c) 2026 BNBChain Contributors, licensed under the MIT License.
+
+The upstream MIT license and copyright notice are retained in LICENSE. Bitgold-specific
+changes (package and module names, network presets, contract-address placeholders, payment
+asset catalog, and documentation) are released under the same MIT terms.

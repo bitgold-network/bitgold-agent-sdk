@@ -1,0 +1,14 @@
+"""Run the Blockchain News Agent server (mount mode)."""
+
+import os
+import sys
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+import uvicorn
+from service_mount import HOST, app
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8003"))
+    uvicorn.run(app, host=HOST, port=port)
