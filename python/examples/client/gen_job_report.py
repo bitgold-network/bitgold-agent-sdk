@@ -26,7 +26,7 @@ from bitgold_agent.erc8183.types import REASON_APPROVED, REASON_REJECTED  # noqa
 from bitgold_agent.utils.public_http import fetch_public_json, public_gateway_url  # noqa: E402
 from bitgold_agent.wallets import EVMWalletProvider  # noqa: E402
 
-SCAN_TX = "https://testnet.bscscan.com/tx/0x"
+SCAN_TX = "https://testnet.bitgold.live/tx/0x"
 
 EMOJI: dict[str, str] = {
     "JobCreated": "🆕",
@@ -280,7 +280,7 @@ def _render(
     l()
     l(f"> Generated: {now}  ")
     l(f"> Network: Bitgold Testnet (chain_id={chain_id})  ")
-    l("> Explorer: https://testnet.bscscan.com")
+    l("> Explorer: https://testnet.bitgold.live")
     l()
     l("---")
     l()

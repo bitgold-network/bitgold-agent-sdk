@@ -1,0 +1,12 @@
+# Normalize line endings: store LF in the repository regardless of the host OS.
+* text=auto eol=lf
+
+# Binary artifacts
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.tgz binary
+*.zip binary

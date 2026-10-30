@@ -147,7 +147,7 @@ def main():
   Owner:       {sdk.wallet_address}
 
   View on explorer:
-    https://testnet.bscscan.com/tx/{result["transactionHash"]}
+    https://testnet.bitgold.live/tx/{result["transactionHash"]}
 
   Save this Agent ID for client configuration:
     AGENT_ID={result["agentId"]}

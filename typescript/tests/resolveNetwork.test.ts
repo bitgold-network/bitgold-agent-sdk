@@ -170,7 +170,9 @@ describe("resolveNetwork precedence", () => {
   });
 
   it("throws on an unknown network name", () => {
-    expect(() => resolveNetwork("opbnb")).toThrow("Unknown network: opbnb");
+    expect(() => resolveNetwork("ethereum")).toThrow(
+      "Unknown network: ethereum",
+    );
   });
 
   it("treats an empty-string env override as unset", () => {

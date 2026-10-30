@@ -111,7 +111,7 @@ DELIVERABLE_URL = "https://example.invalid/manifest.json"  # on-chain flow only
 
 # Minimum preflight balances. Gas: ~15 testnet txs with headroom. Escrow:
 # two job budgets (A pays out to the twak wallet itself, C is refunded).
-MIN_BNB_WEI = 5 * 10**15  # 0.005 tBTG
+MIN_BTG_WEI = 5 * 10**15  # 0.005 tBTG
 
 
 # ── plumbing ───────────────────────────────────────────────────────────────
@@ -246,15 +246,15 @@ def main() -> int:  # noqa: PLR0915 - a linear assert chain reads best inline
     caps = twak_wallet.capabilities()
     if caps != EXPECTED_TWAK_CAPS:
         raise fail(0, f"capability drift: {sorted(caps)} != {sorted(EXPECTED_TWAK_CAPS)}")
-    bnb = twak.w3.eth.get_balance(twak_addr)
+    btg = twak.w3.eth.get_balance(twak_addr)
     u_bal = twak.token_balance(twak_addr)
-    print(f"   twak balances: {bnb / 10**18:.6f} tBTG, {u_bal / 10**decimals} {symbol}")
+    print(f"   twak balances: {btg / 10**18:.6f} tBTG, {u_bal / 10**decimals} {symbol}")
     needed_u = 2 * budget
-    if bnb < MIN_BNB_WEI or u_bal < needed_u:
+    if btg < MIN_BTG_WEI or u_bal < needed_u:
         raise fail(
             0,
             f"FUND ME: the twak wallet {twak_addr} needs >= "
-            f"{MIN_BNB_WEI / 10**18} tBTG for gas (has {bnb / 10**18:.6f}) and >= "
+            f"{MIN_BTG_WEI / 10**18} tBTG for gas (has {btg / 10**18:.6f}) and >= "
             f"{needed_u / 10**decimals} {symbol} for escrow "
             f"(has {u_bal / 10**decimals}). Top it up on {network_name} and rerun.",
         )

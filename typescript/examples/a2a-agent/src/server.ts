@@ -94,7 +94,7 @@ const AGENT_CARD = {
         '"task_description": "...", "terms": {...}} and receive a ' +
         "wallet-signed quote (price, currency, negotiation_hash, provider_sig). " +
         "Anchor the returned envelope on-chain via createJob.",
-      tags: ["erc8183", "negotiation", "bnb-chain"],
+      tags: ["erc8183", "negotiation", "bitgold"],
       inputModes: ["application/json"],
       outputModes: ["application/json"],
     },

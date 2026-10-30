@@ -52,10 +52,10 @@ def _fixture(name: str) -> dict:
 
 # Field-verified addresses from the captures.
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-U_BSC = "0xce24439f2d9c6a2289f741120fe202248b666666"
-PIEVERSE_PAY_TO = "0x4ba07885c7a05734be6ea6f46f749564e1476751"
+BTG_ASSET = "0xce24439f2d9c6a2289f741120fe202248b666666"
+PLATFORM_PAY_TO = "0x4ba07885c7a05734be6ea6f46f749564e1476751"
 ONESOURCE_PAY_TO = "0x52E29e0d2Aa49bfBfC548C0A9F2196F4aa51f3ea"
-PIEVERSE_TX = "0x09b1af61cdf080e4f3fc7dd999626268ed07ccfdb629b0c0c764b175830c22f8"
+PLATFORM_TX = "0x09b1af61cdf080e4f3fc7dd999626268ed07ccfdb629b0c0c764b175830c22f8"
 
 URL = "https://pay.bitgold.io/v1/topup/x402"
 
@@ -71,8 +71,8 @@ def _stub_provider(quote="quote_bitgold_u.json", request="request_success_bitgol
 def _payer(provider, **overrides):
     return TwakX402Payer(
         provider,
-        expected_pay_to=overrides.pop("expected_pay_to", PIEVERSE_PAY_TO),
-        expected_asset=overrides.pop("expected_asset", U_BSC),
+        expected_pay_to=overrides.pop("expected_pay_to", PLATFORM_PAY_TO),
+        expected_asset=overrides.pop("expected_asset", BTG_ASSET),
         **overrides,
     )
 
@@ -88,7 +88,7 @@ def test_trusted_recipient_and_asset_anchors_are_required_and_validated():
         TwakX402Payer(
             provider,
             expected_pay_to="not-an-address",
-            expected_asset=U_BSC,
+            expected_asset=BTG_ASSET,
         )
 
 
@@ -139,11 +139,11 @@ def test_request_happy_path_bitgold():
     assert result.response == _fixture("request_success_bitgold.json")
     # payment metadata comes from the QUOTED option, not from settlement
     assert result.amount == 100000000000000000
-    assert result.asset == U_BSC
+    assert result.asset == BTG_ASSET
     assert result.network == "eip155:618"
-    assert result.pay_to == PIEVERSE_PAY_TO
+    assert result.pay_to == PLATFORM_PAY_TO
     # transaction is best-effort from the endpoint's own body (tx_hash)
-    assert result.transaction == PIEVERSE_TX
+    assert result.transaction == PLATFORM_TX
 
     # the request is pinned to the prechecked route (TOCTOU narrowing) and
     # twak's cap is the quoted amount, not the caller's larger max_payment
@@ -152,7 +152,7 @@ def test_request_happy_path_bitgold():
     assert kwargs["method"] == "POST"
     assert kwargs["body"] == '{"amountUsd":0.1}'
     assert kwargs["prefer_network"] == "eip155:618"
-    assert kwargs["prefer_asset"] == U_BSC
+    assert kwargs["prefer_asset"] == BTG_ASSET
 
 
 @pytest.mark.parametrize(("quoted", "max_payment"), [(1, 3), (0, 100), (5, 5)])
@@ -163,14 +163,14 @@ def test_cli_cap_is_the_quoted_amount_not_the_caller_cap(quoted, max_payment):
     quote["accepts"][0]["amount"] = str(quoted)
     provider = _stub_provider()
     provider.x402_quote.return_value = quote
-    tracker = SessionBudgetTracker(caps={U_BSC: 10**18})
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: 10**18})
     payer = _payer(provider, session_budget=tracker)
 
     result = payer.request(URL, max_payment=max_payment)
 
     assert provider.x402_request.call_args.kwargs["max_payment"] == quoted
     assert result.amount == quoted
-    assert tracker.spent(U_BSC) == quoted
+    assert tracker.spent(BTG_ASSET) == quoted
 
 
 ATTACKER = "0x" + "33" * 20
@@ -200,12 +200,12 @@ def test_prefer_method_selects_the_route_before_the_precheck():
 @pytest.mark.parametrize("prefer", ["permit2", "PERMIT2-EXACT", "permit2-exact"])
 def test_prefer_method_passes_a_trusted_route_and_forwards_the_canonical_method(prefer):
     provider = _stub_provider()
-    provider.x402_quote.return_value = _two_route_quote(permit2_pay_to=PIEVERSE_PAY_TO)
+    provider.x402_quote.return_value = _two_route_quote(permit2_pay_to=PLATFORM_PAY_TO)
     payer = _payer(provider)
 
     result = payer.request(URL, max_payment=10**18, prefer_method=prefer)
 
-    assert result.pay_to == PIEVERSE_PAY_TO
+    assert result.pay_to == PLATFORM_PAY_TO
     assert provider.x402_request.call_args.kwargs["prefer_method"] == "permit2-exact"
 
 
@@ -213,12 +213,12 @@ def test_no_method_preference_pins_the_default_routes_method():
     # Audit M02: without a pin twak may pay a re-fetched route that differs
     # only in its transfer method, which its prompt does not show.
     provider = _stub_provider()
-    provider.x402_quote.return_value = _two_route_quote(permit2_pay_to=PIEVERSE_PAY_TO)
+    provider.x402_quote.return_value = _two_route_quote(permit2_pay_to=PLATFORM_PAY_TO)
     payer = _payer(provider)
 
     result = payer.request(URL, max_payment=10**18)
 
-    assert result.pay_to.lower() == PIEVERSE_PAY_TO.lower()
+    assert result.pay_to.lower() == PLATFORM_PAY_TO.lower()
     assert provider.x402_request.call_args.kwargs["prefer_method"] == "eip3009"
 
 
@@ -250,8 +250,8 @@ def test_request_passes_matching_expectations():
     provider = _stub_provider()
     payer = _payer(
         provider,
-        expected_pay_to=PIEVERSE_PAY_TO.upper(),
-        expected_asset=U_BSC.upper(),
+        expected_pay_to=PLATFORM_PAY_TO.upper(),
+        expected_asset=BTG_ASSET.upper(),
     )
     result = payer.request(URL, max_payment=10**18)
     assert result.success is True
@@ -273,7 +273,7 @@ def test_empty_accepts_raises_no_payable_route():
 def test_pay_to_mismatch_rejected():
     provider = _stub_provider()
     payer = _payer(provider, expected_pay_to="0x" + "aa" * 20)
-    with pytest.raises(X402RecipientMismatchError, match=PIEVERSE_PAY_TO):
+    with pytest.raises(X402RecipientMismatchError, match=PLATFORM_PAY_TO):
         payer.request(URL, max_payment=10**18)
     provider.x402_request.assert_not_called()
 
@@ -330,19 +330,19 @@ def test_default_timeout_cap_accepts_3600s_endpoint():
 
 
 def test_budget_reserved_by_quoted_amount_keyed_by_asset():
-    tracker = SessionBudgetTracker(caps={U_BSC: 3 * 10**17})
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: 3 * 10**17})
     provider = _stub_provider()
     payer = _payer(provider, session_budget=tracker)
 
     payer.request(URL, max_payment=10**18)
 
     # debited the QUOTED amount (the CLI surfaces no settlement receipt)
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 def test_budget_rolled_back_when_nothing_was_sent():
-    tracker = SessionBudgetTracker(caps={U_BSC: 10**18})
-    tracker.reserve(U_BSC, 5)  # pre-existing spend must survive the rollback
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: 10**18})
+    tracker.reserve(BTG_ASSET, 5)  # pre-existing spend must survive the rollback
     provider = _stub_provider()
     cause = RuntimeError("twak command failed")
     provider.x402_request.side_effect = TwakPaymentNotSentError(cause)
@@ -353,7 +353,7 @@ def test_budget_rolled_back_when_nothing_was_sent():
 
     # callers see the underlying failure, and the reservation was released
     assert raised.value is cause
-    assert tracker.spent(U_BSC) == 5
+    assert tracker.spent(BTG_ASSET) == 5
 
 
 @pytest.mark.parametrize(
@@ -365,7 +365,7 @@ def test_budget_rolled_back_when_nothing_was_sent():
 )
 def test_budget_stays_reserved_when_a_payment_may_have_been_sent(failure):
     # SRC-1348: only a failure known to precede the payment releases budget
-    tracker = SessionBudgetTracker(caps={U_BSC: 10**18})
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: 10**18})
     provider = _stub_provider()
     provider.x402_request.side_effect = failure
     payer = _payer(provider, session_budget=tracker)
@@ -373,11 +373,11 @@ def test_budget_stays_reserved_when_a_payment_may_have_been_sent(failure):
     with pytest.raises(type(failure)):
         payer.request(URL, max_payment=10**18)
 
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 def test_budget_exhausted_raises_before_payment():
-    tracker = SessionBudgetTracker(caps={U_BSC: 10**17 - 1})  # below the quote
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: 10**17 - 1})  # below the quote
     provider = _stub_provider()
     payer = _payer(provider, session_budget=tracker)
 
@@ -385,7 +385,7 @@ def test_budget_exhausted_raises_before_payment():
         payer.request(URL, max_payment=10**18)
 
     provider.x402_request.assert_not_called()
-    assert tracker.spent(U_BSC) == 0  # a rejected payment never consumes budget
+    assert tracker.spent(BTG_ASSET) == 0  # a rejected payment never consumes budget
 
 
 # ── make_x402_payer: the selection seam (capability gate + twak override) ──
@@ -397,13 +397,13 @@ def test_twak_make_x402_payer_applies_kwargs_without_cli_calls():
         tracker = SessionBudgetTracker()
         payer = twak.make_x402_payer(
             session_budget=tracker,
-            expected_pay_to=PIEVERSE_PAY_TO,
-            expected_asset=U_BSC,
+            expected_pay_to=PLATFORM_PAY_TO,
+            expected_asset=BTG_ASSET,
         )
     assert isinstance(payer, TwakX402Payer)
     assert payer._provider is twak
     assert payer._session_budget is tracker
-    assert payer._expected_pay_to.lower() == PIEVERSE_PAY_TO.lower()
+    assert payer._expected_pay_to.lower() == PLATFORM_PAY_TO.lower()
     assert payer._max_timeout_seconds == DEFAULT_MAX_TIMEOUT_SECONDS  # F-2
     run.assert_not_called()  # construction-time seam: no probe, no CLI
 
@@ -449,8 +449,8 @@ def test_end_to_end_request_through_twak_provider():
 
     twak = TWAKProvider()
     payer = twak.make_x402_payer(
-        expected_pay_to=PIEVERSE_PAY_TO,
-        expected_asset=U_BSC,
+        expected_pay_to=PLATFORM_PAY_TO,
+        expected_asset=BTG_ASSET,
     )
     confirmed = MagicMock(return_value=_fixture("request_success_bitgold.json"))
     with (
@@ -460,8 +460,8 @@ def test_end_to_end_request_through_twak_provider():
         result = payer.request(URL, max_payment=10**18)
 
     assert result.success is True
-    assert result.transaction == PIEVERSE_TX
-    assert result.asset == U_BSC
+    assert result.transaction == PLATFORM_TX
+    assert result.asset == BTG_ASSET
 
     # F-3: the quote ran first and WITHOUT a wallet probe
     assert calls[0][:3] == ["twak", "x402", "quote"]
@@ -474,12 +474,12 @@ def test_end_to_end_request_through_twak_provider():
     # the payer confirms twak's final terms itself instead of --yes
     assert "--yes" not in request_args
     assert confirmed.call_args.args[1] == TwakPaymentTerms(
-        amount=10**17, asset=U_BSC, network="eip155:618", pay_to=PIEVERSE_PAY_TO
+        amount=10**17, asset=BTG_ASSET, network="eip155:618", pay_to=PLATFORM_PAY_TO
     )
     assert ["--prefer-network", "eip155:618"] == request_args[
         request_args.index("--prefer-network") : request_args.index("--prefer-network") + 2
     ]
-    assert ["--prefer-asset", U_BSC] == request_args[
+    assert ["--prefer-asset", BTG_ASSET] == request_args[
         request_args.index("--prefer-asset") : request_args.index("--prefer-asset") + 2
     ]
 
@@ -494,8 +494,8 @@ _HONEST_PROMPT = {
     "token": "BTG",
     "network": "eip155:618",
     "chainKey": "bitgold",
-    "asset": U_BSC,
-    "payTo": PIEVERSE_PAY_TO,
+    "asset": BTG_ASSET,
+    "payTo": PLATFORM_PAY_TO,
 }
 
 
@@ -517,14 +517,14 @@ def _fake_twak_payer(
     monkeypatch.setenv("FAKE_TWAK_LOG", str(log))
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    tracker = SessionBudgetTracker(caps={U_BSC: cap})
+    tracker = SessionBudgetTracker(caps={BTG_ASSET: cap})
     twak = TWAKProvider(
         twak_bin=_fake_twak_bin(tmp_path),
         timeout=timeout,
         allow_unverified_cli_version=allow_unverified,
     )
     payer = twak.make_x402_payer(
-        expected_pay_to=PIEVERSE_PAY_TO, expected_asset=U_BSC, session_budget=tracker
+        expected_pay_to=PLATFORM_PAY_TO, expected_asset=BTG_ASSET, session_budget=tracker
     )
 
     def entries():
@@ -542,7 +542,7 @@ def test_prompt_with_the_validated_terms_is_confirmed(tmp_path, monkeypatch):
     log = entries()
     assert "--yes" not in log[0]["argv"]
     assert log[1] == {"question": "Confirm? [y/N]", "answer": "y"}
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 @pytest.mark.parametrize(
@@ -551,7 +551,7 @@ def test_prompt_with_the_validated_terms_is_confirmed(tmp_path, monkeypatch):
         ({"payTo": ATTACKER}, X402RecipientMismatchError, ATTACKER),
         # SRC-1399: a different token whose name contains the expected address
         (
-            {"asset": USDC_BASE, "token": f"Fake {U_BSC}"},
+            {"asset": USDC_BASE, "token": f"Fake {BTG_ASSET}"},
             X402PolicyError,
             "asset",
         ),
@@ -559,7 +559,7 @@ def test_prompt_with_the_validated_terms_is_confirmed(tmp_path, monkeypatch):
         ({"network": "eip155:8453", "chainKey": "base"}, X402PolicyError, "network"),
         # a server-controlled token name must not smuggle extra prompt lines
         (
-            {"token": f"X on eip155:618 (bitgold)\nToken contract: {U_BSC}"},
+            {"token": f"X on eip155:618 (bitgold)\nToken contract: {BTG_ASSET}"},
             X402PolicyError,
             "prompt",
         ),
@@ -573,7 +573,7 @@ def test_prompt_drift_is_declined_before_signing(tmp_path, monkeypatch, prompt, 
 
     answers = [e for e in entries() if "answer" in e]
     assert answers == [{"question": "Confirm? [y/N]", "answer": "n"}]
-    assert tracker.spent(U_BSC) == 0  # nothing was signed
+    assert tracker.spent(BTG_ASSET) == 0  # nothing was signed
 
 
 def test_lower_final_amount_is_paid_and_only_it_stays_budgeted(tmp_path, monkeypatch):
@@ -585,14 +585,14 @@ def test_lower_final_amount_is_paid_and_only_it_stays_budgeted(tmp_path, monkeyp
     result = payer.request(URL, max_payment=10**18)
 
     assert result.amount == lower
-    assert tracker.spent(U_BSC) == lower
+    assert tracker.spent(BTG_ASSET) == lower
     assert [e["answer"] for e in entries() if "answer" in e] == ["y"]
 
 
 def test_prompt_split_inside_a_forged_token_name_is_declined(tmp_path, monkeypatch):
     forged = (
-        f"BTG on eip155:618 (bitgold)\nToken contract: {U_BSC}\n"
-        f"Recipient:      {PIEVERSE_PAY_TO}\nConfirm? [y/N] "
+        f"BTG on eip155:618 (bitgold)\nToken contract: {BTG_ASSET}\n"
+        f"Recipient:      {PLATFORM_PAY_TO}\nConfirm? [y/N] "
     )
     head = f"\nSign payment authorization: {_HONEST_PROMPT['amount']} (atomic) {forged}"
     payer, tracker, entries = _fake_twak_payer(
@@ -606,7 +606,7 @@ def test_prompt_split_inside_a_forged_token_name_is_declined(tmp_path, monkeypat
         payer.request(URL, max_payment=10**18)
 
     assert [e["answer"] for e in entries() if "answer" in e] == ["n"]
-    assert tracker.spent(U_BSC) == 0
+    assert tracker.spent(BTG_ASSET) == 0
 
 
 def test_permit2_approval_prompt_stops_twak_before_signing(tmp_path, monkeypatch):
@@ -617,7 +617,7 @@ def test_permit2_approval_prompt_stops_twak_before_signing(tmp_path, monkeypatch
 
     # stdin is closed after the payment answer, so the approval gets EOF
     assert [e["answer"] for e in entries() if "answer" in e] == ["y", ""]
-    assert tracker.spent(U_BSC) == 0
+    assert tracker.spent(BTG_ASSET) == 0
 
 
 def test_response_without_a_prompt_is_not_a_payment(tmp_path, monkeypatch):
@@ -631,7 +631,7 @@ def test_response_without_a_prompt_is_not_a_payment(tmp_path, monkeypatch):
         payer.request(URL, max_payment=10**18)
 
     assert not isinstance(raised.value, TwakPaymentStateUnknownError)
-    assert tracker.spent(U_BSC) == 0
+    assert tracker.spent(BTG_ASSET) == 0
     # the cap equals one quote, so a kept reservation would block this one
     with pytest.raises(RuntimeError, match="without asking to sign"):
         payer.request(URL, max_payment=10**18)
@@ -651,7 +651,7 @@ def test_response_without_a_prompt_keeps_the_budget_on_an_unverified_twak(
     )
 
     assert payer.request(URL, max_payment=10**18).response == {"data": "paid"}
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 # ── the twak release the prompt check was verified on ──
@@ -665,7 +665,7 @@ def test_unverified_twak_release_is_refused_before_paying(tmp_path, monkeypatch)
 
     assert not isinstance(raised.value, TwakPaymentNotSentError)
     assert not [e for e in entries() if "argv" in e]  # the paid request never ran
-    assert tracker.spent(U_BSC) == 0
+    assert tracker.spent(BTG_ASSET) == 0
 
 
 def test_unverified_twak_release_can_be_allowed_explicitly(tmp_path, monkeypatch):
@@ -708,7 +708,7 @@ def test_paid_error_body_keeps_the_budget_spent(tmp_path, monkeypatch, body):
 
     assert result.response == body
     assert result.transaction is None
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
     with pytest.raises(X402BudgetExhaustedError):
         payer.request(URL, max_payment=10**18)
 
@@ -721,7 +721,7 @@ def test_failure_before_the_confirmation_releases_the_budget(tmp_path, monkeypat
 
     assert not isinstance(raised.value, TwakPaymentNotSentError)
     assert not [e for e in entries() if "answer" in e]
-    assert tracker.spent(U_BSC) == 0
+    assert tracker.spent(BTG_ASSET) == 0
 
 
 def test_failure_after_the_confirmation_keeps_the_budget(tmp_path, monkeypatch):
@@ -730,7 +730,7 @@ def test_failure_after_the_confirmation_keeps_the_budget(tmp_path, monkeypatch):
     with pytest.raises(TwakPaymentStateUnknownError, match="may have been sent"):
         payer.request(URL, max_payment=10**18)
 
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 def test_failure_after_confirming_a_lower_amount_keeps_only_that_amount(tmp_path, monkeypatch):
@@ -742,7 +742,7 @@ def test_failure_after_confirming_a_lower_amount_keeps_only_that_amount(tmp_path
     with pytest.raises(TwakPaymentStateUnknownError):
         payer.request(URL, max_payment=10**18)
 
-    assert tracker.spent(U_BSC) == lower
+    assert tracker.spent(BTG_ASSET) == lower
 
 
 def test_timeout_after_the_confirmation_keeps_the_budget(tmp_path, monkeypatch):
@@ -751,7 +751,7 @@ def test_timeout_after_the_confirmation_keeps_the_budget(tmp_path, monkeypatch):
     with pytest.raises(TwakPaymentStateUnknownError, match="timed out"):
         payer.request(URL, max_payment=10**18)
 
-    assert tracker.spent(U_BSC) == 10**17
+    assert tracker.spent(BTG_ASSET) == 10**17
 
 
 def test_provider_without_expected_terms_keeps_the_yes_flag(tmp_path, monkeypatch):

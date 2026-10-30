@@ -71,4 +71,4 @@ class TestResolveNetworkPrecedence:
 
     def test_unknown_network_raises(self):
         with pytest.raises(ValueError, match="Unknown network"):
-            resolve_network("opbnb")
+            resolve_network("ethereum")

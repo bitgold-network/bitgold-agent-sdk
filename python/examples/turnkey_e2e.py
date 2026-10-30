@@ -48,7 +48,7 @@ from bitgold_agent.networks.addresses import BITGOLD_CHAIN_ADDRESSES
 from bitgold_agent.wallets import TurnkeyWalletProvider
 
 CHAIN_ID = 617
-DEFAULT_RPC = "https://data-seed-prebsc-1-s1.bitgold.org:8545"
+DEFAULT_RPC = "https://testnet1.bitgold.network"
 GAP_S = 1.1  # free tier: 1 request/second — stay under it
 SIGNATURE_BUDGET = 4
 
