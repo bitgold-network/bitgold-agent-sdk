@@ -246,15 +246,15 @@ import { ERC8183JobOps, NegotiationHandler } from "@bitgold-agent/sdk/erc8183";
 
 ```
 NetworkConfig (NETWORKS dict in config.py)
-  ├── bitgold-testnet  (chain_id=617)  - presets carry the zero address; contracts not deployed yet
-  └── bitgold-mainnet  (chain_id=618)  - presets carry the zero address; contracts not deployed yet
+  ├── bitgold-testnet  (chain_id=617)  - ERC-8004/8183 addresses are zero placeholders
+  └── bitgold-mainnet  (chain_id=618)  - ERC-8004/8183 addresses are zero placeholders
 
 resolve_network(name) + env var overrides
   ↓ (clients assert w3.eth.chain_id == nc.chain_id at init - wrong RPC → ValueError)
 per-config wallet plumbing (AgentConfig subclasses, e.g. ERC8183Config)
 ```
 
-Both presets ship the zero address for every contract until the Bitgold deployments are published. The SDK is API-complete; fill in the `*_ADDRESS` variables below (or edit the presets) before any on-chain write.
+Both presets ship the zero address for the ERC-8004/8183 contracts until the Bitgold deployments are published, and pin the BTG payment token to the documented placeholder `0x000000000000000000000000000000000000B706` (see `networks/assets.py` / `networks/assets.ts`). The SDK is API-complete; fill in the `*_ADDRESS` variables below (or edit the presets) before any on-chain write.
 
 **Environment variable overrides** (module-scoped):
 

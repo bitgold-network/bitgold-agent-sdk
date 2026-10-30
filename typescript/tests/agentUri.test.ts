@@ -127,7 +127,8 @@ describe("AgentURIGenerator.generateRegistrationFile", () => {
       expect(file.registrations).toEqual([
         {
           agentId: 1,
-          agentRegistry: "eip155:617:0x5FbDB2315678afecb367f032d93F642f64180aa3",
+          agentRegistry:
+            "eip155:617:0x5FbDB2315678afecb367f032d93F642f64180aa3",
         },
       ]);
     });

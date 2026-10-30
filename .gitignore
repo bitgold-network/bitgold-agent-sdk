@@ -84,3 +84,5 @@ examples/*/uv.lock
 # Vendored contract ABIs — copied from the repo-root abis/ (source of truth) into
 # the Python package at build time by python/hatch_build.py. Never commit the copy.
 python/bitgold_agent/abis/
+# pytest tmp dirs (test-run artifacts)
+pytest-of-*/

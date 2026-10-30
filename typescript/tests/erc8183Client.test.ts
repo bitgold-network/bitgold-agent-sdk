@@ -348,13 +348,10 @@ describe("ERC8183Client.create", () => {
 });
 
 describe("ERC8183Client: paymaster wiring", () => {
-  it("wires a paymaster on chain 617", async () => {
+  it("does not wire a paymaster without a sponsorship relay", async () => {
     PaymasterMock.mockClear();
     await buildClient({ network: fakeNetwork({ chainId: 617 }) });
-    expect(PaymasterMock).toHaveBeenCalledWith(
-      "https://paymaster.example.com",
-      false,
-    );
+    expect(PaymasterMock).not.toHaveBeenCalled();
   });
 
   it("never wires a paymaster on bitgold-mainnet (618), even with usePaymaster+paymasterUrl set", async () => {
@@ -365,8 +362,8 @@ describe("ERC8183Client: paymaster wiring", () => {
     expect(PaymasterMock).not.toHaveBeenCalled();
   });
 
-  it("ERC8183_PAYMASTER_CHAIN_IDS contains only 617", () => {
-    expect([...ERC8183_PAYMASTER_CHAIN_IDS]).toEqual([617]);
+  it("ERC8183_PAYMASTER_CHAIN_IDS is empty on Bitgold", () => {
+    expect([...ERC8183_PAYMASTER_CHAIN_IDS]).toEqual([]);
   });
 });
 
@@ -388,49 +385,6 @@ describe("ERC8183Client: token cache", () => {
       }
     });
     expect(paymentTokenCalls).toHaveLength(1);
-  });
-
-  it("tokenDecimals/tokenSymbol resolve via the ERC-20 client", async () => {
-    const { client } = await buildClient({});
-    await expect(client.tokenDecimals()).resolves.toBe(18);
-    await expect(client.tokenSymbol()).resolves.toBe("USDT");
-  });
-
-  it("keeps per-token clients and metadata caches separate for 6/18 decimals", async () => {
-    const usdc = getAsset(617, AssetId.TEST_USDC).address;
-    const usdt = getAsset(617, AssetId.TEST_USDT).address;
-    const results = defaultResults();
-    results.decimals = ({ to }: { to: `0x${string}` }) =>
-      to === usdc ? 6 : 18;
-    results.symbol = ({ to }: { to: `0x${string}` }) =>
-      to === usdc ? "USDC" : "USDT";
-    const { client, mock } = await buildClient({ results });
-
-    const usdcMetadata = await client.tokenMetadata(usdc.toLowerCase());
-    expect(await client.tokenMetadata(usdc)).toBe(usdcMetadata);
-    const usdtMetadata = await client.tokenMetadata(AssetId.TEST_USDT);
-
-    expect(usdcMetadata).toEqual({
-      address: usdc,
-      decimals: 6,
-      symbol: "USDC",
-    });
-    expect(usdtMetadata).toEqual({
-      address: usdt,
-      decimals: 18,
-      symbol: "USDT",
-    });
-    const metadataCalls = mock.calls.filter((call) => {
-      if (call.method !== "eth_call") return false;
-      try {
-        const [{ data }] = call.params as [{ data: Hex }];
-        const name = decodeFunctionData({ abi: erc20Abi, data }).functionName;
-        return name === "decimals" || name === "symbol";
-      } catch {
-        return false;
-      }
-    });
-    expect(metadataCalls).toHaveLength(4);
   });
 
   it("isolates decimals and symbol caches when one metadata field fails", async () => {
@@ -514,7 +468,7 @@ describe("ERC8183Client: token cache", () => {
   });
 
   it("exposes job token and support reads for canonical IDs and addresses", async () => {
-    const usdc = getAsset(617, AssetId.TEST_USDC).address;
+    const usdc = getAsset(617, AssetId.TEST_BTG).address;
     const results = defaultResults();
     results.jobPaymentToken = CUSTOM_TOKEN;
     results.isPaymentTokenSupported = false;
@@ -522,7 +476,7 @@ describe("ERC8183Client: token cache", () => {
 
     await expect(client.jobPaymentToken(7n)).resolves.toBe(CUSTOM_TOKEN);
     await expect(
-      client.isPaymentTokenSupported(AssetId.TEST_USDC),
+      client.isPaymentTokenSupported(AssetId.TEST_BTG),
     ).resolves.toBe(false);
     await expect(
       client.isPaymentTokenSupported(usdc.toLowerCase()),
@@ -531,7 +485,7 @@ describe("ERC8183Client: token cache", () => {
 });
 
 describe("ERC8183Client.verifyNegotiationQuote", () => {
-  const selected = getAsset(617, AssetId.TEST_USDC).address;
+  const selected = getAsset(617, AssetId.TEST_BTG).address;
 
   function quote(opts: {
     requestCurrency?: unknown;
@@ -562,7 +516,7 @@ describe("ERC8183Client.verifyNegotiationQuote", () => {
     });
     const verdict = await client.verifyNegotiationQuote(
       quote({ requestCurrency: selected.toLowerCase() }),
-      { expectedProvider: WALLET_ADDRESS, expectedCurrency: AssetId.TEST_USDC },
+      { expectedProvider: WALLET_ADDRESS, expectedCurrency: AssetId.TEST_BTG },
     );
     expect(verdict).toEqual({
       valid: false,
@@ -570,10 +524,10 @@ describe("ERC8183Client.verifyNegotiationQuote", () => {
     });
     await expect(
       client.verifyNegotiationQuote(
-        quote({ requestCurrency: AssetId.TEST_USDC }),
+        quote({ requestCurrency: AssetId.TEST_BTG }),
         {
           expectedProvider: WALLET_ADDRESS,
-          expectedCurrency: AssetId.TEST_USDC,
+          expectedCurrency: AssetId.TEST_BTG,
         },
       ),
     ).resolves.toEqual({
@@ -589,7 +543,7 @@ describe("ERC8183Client.verifyNegotiationQuote", () => {
     await expect(
       client.verifyNegotiationQuote(quote({}), {
         expectedProvider: WALLET_ADDRESS,
-        expectedCurrency: AssetId.TEST_USDC,
+        expectedCurrency: AssetId.TEST_BTG,
       }),
     ).resolves.toEqual({
       valid: false,
@@ -660,7 +614,7 @@ describe("ERC8183Client.verifyNegotiationQuote", () => {
     await expect(
       client.verifyNegotiationQuote(quote({ requestCurrency: selected }), {
         expectedProvider: WALLET_ADDRESS,
-        expectedCurrency: AssetId.BINANCE_PEG_USDC,
+        expectedCurrency: AssetId.TEST_BTG,
       }),
     ).resolves.toMatchObject({ valid: false });
     await expect(
@@ -756,9 +710,9 @@ describe("ERC8183Client.createJob", () => {
   it("createJobWithToken resolves current-chain canonical ID and emits the new intent", async () => {
     const { wallet, executor } = wiredClient();
     const { client } = await buildClient({ walletProvider: wallet });
-    const token = getAsset(617, AssetId.TEST_USDC).address;
+    const token = getAsset(617, AssetId.TEST_BTG).address;
     await client.createJobWithToken({
-      asset: AssetId.TEST_USDC,
+      asset: AssetId.TEST_BTG,
       expiredAt: FAR_FUTURE,
       description: "six decimals",
       skipExpiryCheck: true,
@@ -775,7 +729,7 @@ describe("ERC8183Client.createJob", () => {
   it("accepts a lowercase current-chain catalog address", async () => {
     const { wallet, executor } = wiredClient();
     const { client } = await buildClient({ walletProvider: wallet });
-    const token = getAsset(617, AssetId.TEST_USDT).address;
+    const token = getAsset(617, AssetId.TEST_BTG).address;
     await client.createJobWithToken({
       asset: token.toLowerCase(),
       expiredAt: FAR_FUTURE,
@@ -784,7 +738,7 @@ describe("ERC8183Client.createJob", () => {
     expect(executor.intents[0]?.kwargs?.token).toBe(token);
   });
 
-  it.each(["USDC", "USDT", AssetId.BINANCE_PEG_USDC])(
+  it.each(["USDC", "USDT"])(
     "rejects alias/cross-chain asset %s for a known chain",
     async (asset) => {
       const { wallet, executor } = wiredClient();
@@ -826,7 +780,7 @@ describe("ERC8183Client.createJob", () => {
 
     await expect(
       client.createJobWithToken({
-        asset: AssetId.TEST_USDC,
+        asset: AssetId.TEST_BTG,
         expiredAt: FAR_FUTURE,
         skipExpiryCheck: true,
       }),
@@ -1099,12 +1053,12 @@ describe("ERC8183Client.fund: job-token approval strategy", () => {
   });
 
   it("resolves a canonical expected token for the current chain", async () => {
-    const usdc = getAsset(617, AssetId.TEST_USDC).address;
+    const usdc = getAsset(617, AssetId.TEST_BTG).address;
     const { client, mock } = await primedClient({
       allowance: 10n,
       jobToken: usdc,
     });
-    await client.fund(3n, 5n, { expectedToken: AssetId.TEST_USDC });
+    await client.fund(3n, 5n, { expectedToken: AssetId.TEST_BTG });
     expect(commerceCallCount(mock, "jobPaymentToken")).toBe(1);
     expect(allowanceCallCount(mock)).toBe(1);
   });

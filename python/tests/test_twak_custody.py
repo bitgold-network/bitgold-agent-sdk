@@ -10,9 +10,17 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
+import pytest
+
 from bitgold_agent.wallets import materialize_twak_home
+
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes (0700/0600) are not enforceable on Windows",
+)
 
 # Stand-ins for the (encrypted) bundle values — written verbatim, never parsed.
 WALLET_JSON = '{"version":1,"crypto":{"cipher":"aes-256-gcm","ciphertext":"deadbeef"}}'
@@ -23,6 +31,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
+@posix_only
 def test_materialize_writes_dir_0700_and_files_0600(tmp_path):
     returned = materialize_twak_home(
         wallet_json=WALLET_JSON, credentials_json=CREDENTIALS_JSON, home=tmp_path
@@ -40,6 +49,7 @@ def test_materialize_writes_dir_0700_and_files_0600(tmp_path):
     assert _mode(creds) == 0o600
 
 
+@posix_only
 def test_materialize_idempotent_never_overwrites(tmp_path):
     # INV-4: a second materialization with DIFFERENT content must leave the
     # existing key material untouched — a wallet can never be silently
@@ -56,12 +66,14 @@ def test_materialize_idempotent_never_overwrites(tmp_path):
     assert (tmp_path / ".twak" / "credentials.json").read_text() == CREDENTIALS_JSON
 
 
+@posix_only
 def test_materialize_without_credentials_writes_only_wallet(tmp_path):
     materialize_twak_home(wallet_json=WALLET_JSON, home=tmp_path)
     assert (tmp_path / ".twak" / "wallet.json").read_text() == WALLET_JSON
     assert not (tmp_path / ".twak" / "credentials.json").exists()
 
 
+@posix_only
 def test_materialize_accepts_str_home_and_returns_path(tmp_path):
     returned = materialize_twak_home(wallet_json=WALLET_JSON, home=str(tmp_path))
     assert isinstance(returned, Path)

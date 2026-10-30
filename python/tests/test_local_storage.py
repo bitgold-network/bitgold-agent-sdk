@@ -2,11 +2,12 @@
 
 import os
 import stat
+import tempfile
 
 import pytest
 
-import os
-import tempfile
+from bitgold_agent.exceptions import StorageError
+from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
 
 
 def _symlinks_supported() -> bool:
@@ -21,10 +22,6 @@ def _symlinks_supported() -> bool:
 requires_symlinks = pytest.mark.skipif(
     not _symlinks_supported(), reason="filesystem does not allow creating symlinks"
 )
-
-
-from bitgold_agent.exceptions import StorageError
-from bitgold_agent.storage.local_storage_provider import LocalStorageProvider
 
 
 class TestLocalStorageProvider:

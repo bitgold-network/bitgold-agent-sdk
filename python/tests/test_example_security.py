@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
-
-import os
-import tempfile
 
 
 def _symlinks_supported() -> bool:

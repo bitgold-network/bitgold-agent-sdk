@@ -17,17 +17,17 @@ import {
 describe("getAddress", () => {
   it("returns the mainnet payment token", () => {
     const d = getAddress(BITGOLD_MAINNET_CHAIN_ID);
-    expect(d.paymentToken).toBe("0x0000000000000000000000000000000000000000");
+    expect(d.paymentToken).toBe("0x000000000000000000000000000000000000B706");
   });
 
   it("returns the testnet payment token", () => {
     const d = getAddress(BITGOLD_TESTNET_CHAIN_ID);
-    expect(d.paymentToken).toBe("0x0000000000000000000000000000000000000000");
+    expect(d.paymentToken).toBe("0x000000000000000000000000000000000000B706");
   });
 
   it("throws with chain id and known-ids list for an unknown chain", () => {
     expect(() => getAddress(1)).toThrow(
-      "no Bitgold Network deployment registered for chain_id=1; known: [618, 617]",
+      "no Bitgold Network deployment registered for chain_id=1; known: [617, 618]",
     );
   });
 });
@@ -94,12 +94,12 @@ describe("knownPaymentTokens", () => {
     const pairs = knownPaymentTokens();
     expect(
       pairs.has(
-        `${BITGOLD_MAINNET_CHAIN_ID}:0x0000000000000000000000000000000000000000`,
+        `${BITGOLD_MAINNET_CHAIN_ID}:0x000000000000000000000000000000000000B706`,
       ),
     ).toBe(true);
     expect(
       pairs.has(
-        `${BITGOLD_TESTNET_CHAIN_ID}:0x0000000000000000000000000000000000000000`,
+        `${BITGOLD_TESTNET_CHAIN_ID}:0x000000000000000000000000000000000000B706`,
       ),
     ).toBe(true);
     expect(pairs.size).toBe(2); // update when adding more networks

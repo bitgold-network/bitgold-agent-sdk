@@ -110,8 +110,12 @@ def test_unknown_assets_and_chains_are_rejected() -> None:
 
 def test_atomic_amounts_use_eighteen_decimals() -> None:
     assert networks.to_asset_atomic(MAINNET, networks.AssetId.BTG, "0") == 0
-    assert networks.to_asset_atomic(MAINNET, networks.AssetId.BTG, "1.5") == 1_500_000_000_000_000_000
-    assert networks.to_asset_atomic(TESTNET, networks.AssetId.TEST_BTG, "0.000000000000000001") == 1
+    assert (
+        networks.to_asset_atomic(MAINNET, networks.AssetId.BTG, "1.5") == 1_500_000_000_000_000_000
+    )
+    assert (
+        networks.to_asset_atomic(TESTNET, networks.AssetId.TEST_BTG, "0.000000000000000001") == 1
+    )
 
     for invalid in ("", "-1", "1e18", "1.2.3", " 1", "1."):
         with pytest.raises(ValueError, match="invalid decimal amount"):

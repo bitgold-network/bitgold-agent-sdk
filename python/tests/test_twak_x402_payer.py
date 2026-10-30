@@ -40,6 +40,11 @@ from bitgold_agent.x402.twak import DEFAULT_MAX_TIMEOUT_SECONDS
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "twak_x402"
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake twak CLI is a POSIX sh launcher; CI runs these on Linux",
+)
+
 
 def _fixture(name: str) -> dict:
     return json.loads((_FIXTURES / name).read_text())
@@ -55,7 +60,7 @@ PIEVERSE_TX = "0x09b1af61cdf080e4f3fc7dd999626268ed07ccfdb629b0c0c764b175830c22f
 URL = "https://pay.bitgold.io/v1/topup/x402"
 
 
-def _stub_provider(quote="quote_bsc_u.json", request="request_success_bitgold.json"):
+def _stub_provider(quote="quote_bitgold_u.json", request="request_success_bitgold.json"):
     """Duck-typed provider: the payer's contract is just these two methods."""
     provider = types.SimpleNamespace()
     provider.x402_quote = MagicMock(return_value=_fixture(quote))
@@ -115,7 +120,7 @@ def test_quote_parses_base_usdc_challenge():
 
 
 def test_quote_forwards_method_and_body():
-    provider = _stub_provider(quote="quote_bsc_u.json")
+    provider = _stub_provider(quote="quote_bitgold_u.json")
     _payer(provider).quote(URL, method="POST", body='{"amountUsd":0.1}')
     provider.x402_quote.assert_called_once_with(URL, method="POST", body='{"amountUsd":0.1}')
 
@@ -154,7 +159,7 @@ def test_request_happy_path_bitgold():
 def test_cli_cap_is_the_quoted_amount_not_the_caller_cap(quoted, max_payment):
     # SRC-1333 / SRC-1544: twak re-fetches the challenge and only checks its
     # amount against --max-payment, so the cap must equal what was reserved.
-    quote = _fixture("quote_bsc_u.json")
+    quote = _fixture("quote_bitgold_u.json")
     quote["accepts"][0]["amount"] = str(quoted)
     provider = _stub_provider()
     provider.x402_quote.return_value = quote
@@ -173,7 +178,7 @@ ATTACKER = "0x" + "33" * 20
 
 def _two_route_quote(permit2_pay_to=ATTACKER):
     """Static challenge: A = trusted EIP-3009 route, B = Permit2 route."""
-    quote = _fixture("quote_bsc_u.json")
+    quote = _fixture("quote_bitgold_u.json")
     route_a = dict(quote["accepts"][0])
     route_b = dict(route_a, transferMethod="permit2-exact", payTo=permit2_pay_to, preferred=False)
     quote["accepts"] = [route_a, route_b]
@@ -222,7 +227,7 @@ def test_no_method_preference_pins_the_default_routes_method():
     [("permit2", "permit2-exact"), ("permit2-exact", "permit2-exact"), (None, "eip3009")],
 )
 def test_the_prechecked_routes_canonical_method_is_pinned(transfer_method, pinned):
-    quote = _fixture("quote_bsc_u.json")
+    quote = _fixture("quote_bitgold_u.json")
     quote["accepts"][0]["transferMethod"] = transfer_method
     provider = _stub_provider()
     provider.x402_quote.return_value = quote
@@ -439,7 +444,7 @@ def test_end_to_end_request_through_twak_provider():
         if cmd[1] == "wallet" and cmd[2] == "status":
             return _completed(cmd, {"agentWallet": "configured"})
         if cmd[1] == "x402" and cmd[2] == "quote":
-            return _completed(cmd, _fixture("quote_bsc_u.json"))
+            return _completed(cmd, _fixture("quote_bitgold_u.json"))
         raise AssertionError(f"unexpected twak command: {cmd}")
 
     twak = TWAKProvider()
@@ -507,7 +512,7 @@ def _fake_twak_payer(
     tmp_path, monkeypatch, *, prompt=None, timeout=20, cap=10**18, allow_unverified=False, **env
 ):
     log = tmp_path / "twak.log"
-    monkeypatch.setenv("FAKE_TWAK_QUOTE", str(_FIXTURES / "quote_bsc_u.json"))
+    monkeypatch.setenv("FAKE_TWAK_QUOTE", str(_FIXTURES / "quote_bitgold_u.json"))
     monkeypatch.setenv("FAKE_TWAK_PROMPT", json.dumps({**_HONEST_PROMPT, **(prompt or {})}))
     monkeypatch.setenv("FAKE_TWAK_LOG", str(log))
     for key, value in env.items():
@@ -764,6 +769,7 @@ def test_provider_without_expected_terms_keeps_the_yes_flag(tmp_path, monkeypatc
         "https://api.example/paid?access_token=secret",
     ],
 )
+
 def test_sensitive_x402_urls_never_reach_process_argv(url):
     twak = TWAKProvider()
     with patch("bitgold_agent.wallets.twak_provider.subprocess.run") as run:

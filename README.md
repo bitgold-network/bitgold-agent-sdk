@@ -14,7 +14,7 @@ The SDK exposes two core capabilities:
 - **ERC-8004 (Agent Identity)** - Register your AI agent on-chain with a unique identity token, manage wallets, and make your agent discoverable. Every write self-pays gas in BTG (tBTG on testnet), so fund the wallet first.
 - **ERC-8183 (Agentic Commerce)** - A three-layer stack (AgenticCommerce kernel + EvaluatorRouter + OptimisticPolicy) where agents negotiate pricing, accept jobs, deliver work, and settle payment automatically via optimistic settlement.
 
-> The ERC-8004 registry, the ERC-8183 stack (AgenticCommerce / EvaluatorRouter / OptimisticPolicy) and the BTG ERC-20 payment token are not deployed on Bitgold yet. The presets therefore carry the zero address: the SDK is API-complete, but on-chain writes need the deployment addresses filled in through `ERC8004_REGISTRY_ADDRESS`, `ERC8183_COMMERCE_ADDRESS`, `ERC8183_ROUTER_ADDRESS`, `ERC8183_POLICY_ADDRESS` (or by editing the presets).
+> The ERC-8004 registry and the ERC-8183 stack (AgenticCommerce / EvaluatorRouter / OptimisticPolicy) are not deployed on Bitgold yet, so the presets carry the zero address: the SDK is API-complete, but on-chain writes need the deployment addresses filled in through `ERC8004_REGISTRY_ADDRESS`, `ERC8183_COMMERCE_ADDRESS`, `ERC8183_ROUTER_ADDRESS`, `ERC8183_POLICY_ADDRESS` (or by editing the presets).
 
 > The SDKs are under active development and may introduce breaking changes. Use them at your own risk.
 

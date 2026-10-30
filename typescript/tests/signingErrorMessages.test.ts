@@ -16,7 +16,7 @@ import { X402PolicyError, X402SignerError } from "../src/x402/errors.js";
 import { type SignPaymentOptions, X402Signer } from "../src/x402/signer.js";
 
 const hostile = `\nFAKELOG\r\t\x1b[31m\u2028\u2029${"A".repeat(2 * 1024 * 1024)}`;
-const token = getAddress(56).paymentToken;
+const token = getAddress(618).paymentToken;
 const domain = { chainId: 618, verifyingContract: token };
 const types = {
   TransferWithAuthorization: EIP3009_CANONICAL_FIELDS.map(([name, type]) => ({
@@ -107,7 +107,7 @@ describe("signing error messages", () => {
 describe("x402 rejection messages", () => {
   // The signer binds every call to a catalog EIP-3009 route, so the baseline
   // payload is derived from the route itself rather than restated here.
-  const route = resolveExpectedEip3009Route("eip155:618", "U");
+  const route = resolveExpectedEip3009Route("eip155:618", "BTG");
   const x402Domain = {
     name: route.name,
     version: route.version,

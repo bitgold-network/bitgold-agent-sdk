@@ -190,7 +190,7 @@ _SETUP_HINT = (
     "`twak wallet keychain save`."
 )
 
-# twak chain keys for BTG Smart Chain. ERC-8004/8183 are deployed on both
+# twak chain keys for Bitgold Network. ERC-8004/8183 are deployed on both
 # mainnet ("bitgold") and testnet ("bitgold-testnet"). Field-verified against twak
 # v0.18.0: the spec's "bitgold-testnet" key is rejected by the real CLI with
 # CHAIN_UNSUPPORTED ('Did you mean "bitgold"?') — "bitgold-testnet" is the key that
@@ -396,7 +396,7 @@ class TWAKProvider(WalletProvider, IntentExecutor):
     """Wallet + execution backend delegating to the ``twak`` CLI.
 
     Args:
-        chain: twak chain key for BTG Smart Chain — ``"bitgold"`` (mainnet) or
+        chain: twak chain key for Bitgold Network — ``"bitgold"`` (mainnet) or
             ``"bitgold-testnet"``. ERC-8004/8183 are deployed on both. The value
             is passed through to twak verbatim. (Note: the spec's
             ``bitgold-testnet`` spelling is rejected by the real CLI.)
@@ -474,7 +474,7 @@ class TWAKProvider(WalletProvider, IntentExecutor):
     ):
         if chain.lower() not in _ALLOWED_CHAINS:
             raise ValueError(
-                f"TWAKProvider supports BTG Smart Chain only — chain must be "
+                f"TWAKProvider supports Bitgold Network only — chain must be "
                 f"one of {sorted(_ALLOWED_CHAINS)} (got chain={chain!r}). "
                 "ERC-8004/8183 are deployed on bitgold (mainnet) and bitgold-testnet "
                 "(note: twak's testnet key is 'bitgold-testnet', not 'bitgold-testnet')."

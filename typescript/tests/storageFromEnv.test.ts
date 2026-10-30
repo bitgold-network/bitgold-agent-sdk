@@ -55,7 +55,8 @@ describe("LocalStorageProvider.fromEnv", () => {
   });
 
   it("respects STORAGE_LOCAL_PATH", () => {
-    process.env.STORAGE_LOCAL_PATH = "/tmp/bitgold_agent-storage-from-env-custom";
+    process.env.STORAGE_LOCAL_PATH =
+      "/tmp/bitgold_agent-storage-from-env-custom";
     const provider = LocalStorageProvider.fromEnv();
     expect(internals(provider).base).toBe(
       "/tmp/bitgold_agent-storage-from-env-custom",

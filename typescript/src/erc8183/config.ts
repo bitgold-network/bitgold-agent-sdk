@@ -140,7 +140,7 @@ export class ERC8183Config {
           : undefined;
       if (!chain) {
         throw new Error(
-          `WALLET_KIND=twak supports BTG Smart Chain networks only (${Object.keys(TWAK_CHAIN_FOR_NETWORK).join(", ")}); got network=${String(this.network)}`,
+          `WALLET_KIND=twak supports Bitgold Network networks only (${Object.keys(TWAK_CHAIN_FOR_NETWORK).join(", ")}); got network=${String(this.network)}`,
         );
       }
       walletProvider = new TWAKProvider({

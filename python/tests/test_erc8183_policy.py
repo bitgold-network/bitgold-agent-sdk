@@ -13,7 +13,8 @@ def policy_client(mock_web3):
     wallet.address = "0x" + "aa" * 20
     # Mocking the _load_abi to avoid file I/O errors if ABI isn't found
     with patch(
-        "bitgold_agent.erc8183.policy._load_abi", return_value=[{"type": "function", "name": "dispute"}]
+        "bitgold_agent.erc8183.policy._load_abi",
+        return_value=[{"type": "function", "name": "dispute"}],
     ):
         client = PolicyClient(mock_web3, "0x" + "11" * 20, wallet)
         client._send_tx = MagicMock()

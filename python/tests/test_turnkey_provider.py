@@ -106,7 +106,7 @@ def eip3009_fixture() -> tuple[dict, dict]:
 
 def extended_policy() -> SigningPolicy:
     return SigningPolicy.strict_default().extend(
-        domain_allowlist={(97, TEST_DOMAIN["verifyingContract"])}
+        domain_allowlist={(617, TEST_DOMAIN["verifyingContract"])}
     )
 
 
@@ -334,7 +334,7 @@ class TestSignTransaction:
         raw = bytes(signed["rawTransaction"])
         assert bytes(signed["hash"]) == keccak(raw)
         # EIP-155 v for chainId 617: 2*617 + 35/36.
-        assert signed["v"] in (229, 230)
+        assert signed["v"] in (2 * 617 + 35, 2 * 617 + 36)
         assert Account.recover_transaction(raw) == provider.address
 
     def test_eip1559_round_trip(self, fake_client):
@@ -362,7 +362,7 @@ class TestSignTransaction:
         provider = make_provider(fake_client)
         signed = provider.sign_transaction({**LEGACY_TX, "gasPrice": 0})
         assert Account.recover_transaction(bytes(signed["rawTransaction"]))
-        assert signed["v"] in (229, 230)
+        assert signed["v"] in (2 * 617 + 35, 2 * 617 + 36)
 
     def test_contract_creation_omits_to(self, fake_client):
         provider = make_provider(fake_client)

@@ -71,7 +71,7 @@ typed data after merely adding Permit2 to the allowlist.
 
 Both snippets assume a funded wallet on `bitgold-testnet` (get test BTG from the [Bitgold Network faucet](https://faucet.bitgold.network)) and an `.env` populated per the [environment variables](#environment-variables) table below. Call `loadEnv()` once at your entrypoint to load `.env`/`.env.local` (the SDK never does this for you - see its docstring for the precedence rules).
 
-The ERC-8004 registry, the ERC-8183 stack and the BTG ERC-20 payment token are not deployed on Bitgold yet, so the presets carry the zero address: fill in `ERC8004_REGISTRY_ADDRESS` / `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or edit the presets) before any on-chain call.
+The ERC-8004 registry and the ERC-8183 stack are not deployed on Bitgold yet, so the presets carry the zero address: fill in `ERC8004_REGISTRY_ADDRESS` / `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or edit the presets) before any on-chain call.
 
 ### (a) Client-side job lifecycle
 

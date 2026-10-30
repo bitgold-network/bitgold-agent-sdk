@@ -19,8 +19,11 @@ import {
 /** Ports python/tests/test_signing_policy.py. */
 
 const U_MAINNET = getAddress(BITGOLD_MAINNET_CHAIN_ID).paymentToken;
-const U_TESTNET = getB402Asset(BITGOLD_TESTNET_CHAIN_ID, AssetId.TEST_U).address;
-const USD1_MAINNET = getAsset(BITGOLD_MAINNET_CHAIN_ID, AssetId.USD1);
+const U_TESTNET = getB402Asset(
+  BITGOLD_TESTNET_CHAIN_ID,
+  AssetId.TEST_BTG,
+).address;
+const USD1_MAINNET = getAsset(BITGOLD_MAINNET_CHAIN_ID, AssetId.BTG);
 
 const EIP712DOMAIN_FIELDS = [
   { name: "name", type: "string" },
@@ -104,42 +107,24 @@ describe("SigningPolicy.strictDefault", () => {
     expect(pt).toBe("TransferWithAuthorization");
   });
 
-  it("allows only catalog-declared EIP-3009 USD1 domains", () => {
+  it("allows exactly the catalog-declared BTG EIP-3009 domains", () => {
     const policy = SigningPolicy.strictDefault();
     expect(policy.domainAllowlist).toEqual(
       new Set([
         `${BITGOLD_MAINNET_CHAIN_ID}:${U_MAINNET}`,
-        `${BITGOLD_MAINNET_CHAIN_ID}:${USD1_MAINNET.address}`,
         `${BITGOLD_TESTNET_CHAIN_ID}:${U_TESTNET}`,
       ]),
     );
-    expect(
-      twaCall(policy, {
-        domainOverrides: {
-          name: "World Liberty Financial USD",
-          chainId: BITGOLD_MAINNET_CHAIN_ID,
-          verifyingContract: USD1_MAINNET.address,
-        },
-      }),
-    ).toBe("TransferWithAuthorization");
-    expect(() =>
-      twaCall(policy, {
-        domainOverrides: {
-          chainId: BITGOLD_TESTNET_CHAIN_ID,
-          verifyingContract: USD1_MAINNET.address,
-        },
-      }),
-    ).toThrow(/not in allowlist/);
     expect(() =>
       twaCall(policy, {
         domainOverrides: { verifyingContract: `0x${"1".repeat(40)}` },
       }),
     ).toThrow(/not in allowlist/);
-    expect(
-      policy.domainAllowlist.has(
-        `${BITGOLD_TESTNET_CHAIN_ID}:0x0000000000000000000000000000000000000000`,
-      ),
-    ).toBe(false);
+    expect(() =>
+      twaCall(policy, {
+        domainOverrides: { chainId: 1, verifyingContract: U_MAINNET },
+      }),
+    ).toThrow(/not in allowlist/);
   });
 
   it("rejects unknown verifyingContract", () => {
@@ -157,18 +142,6 @@ describe("SigningPolicy.strictDefault", () => {
     expect(caught?.primaryType).toBe("TransferWithAuthorization");
     expect(caught?.chainId).toBe(BITGOLD_MAINNET_CHAIN_ID);
   });
-
-  it.each([AssetId.BINANCE_PEG_USDC, AssetId.BINANCE_PEG_USDT])(
-    "does not treat catalog stablecoin %s as an EIP-3009 domain",
-    (assetId) => {
-      const token = getAsset(BITGOLD_MAINNET_CHAIN_ID, assetId);
-      expect(() =>
-        twaCall(SigningPolicy.strictDefault(), {
-          domainOverrides: { verifyingContract: token.address },
-        }),
-      ).toThrow(/not in allowlist/);
-    },
-  );
 
   it("rejects unknown chainId", () => {
     const p = SigningPolicy.strictDefault();
@@ -221,7 +194,7 @@ describe("SigningPolicy.strictDefault", () => {
   });
 
   it("rejects Permit2 SignatureTransfer primary types by default", () => {
-    const token = getAsset(BITGOLD_MAINNET_CHAIN_ID, AssetId.BINANCE_PEG_USDC);
+    const token = getAsset(BITGOLD_MAINNET_CHAIN_ID, AssetId.BTG);
     const domain = {
       name: "Permit2",
       version: "1",
@@ -810,7 +783,7 @@ describe("toString", () => {
     const p = SigningPolicy.strictDefault();
     const s = p.toString();
     expect(s).toContain("SigningPolicy(");
-    expect(s).toContain("domainAllowlist (3 entries)");
+    expect(s).toContain("domainAllowlist (2 entries)");
     expect(s).toContain("TransferWithAuthorization");
     expect(s).toContain("Permit");
     expect(s).toContain("allowUnknownDomain=false");

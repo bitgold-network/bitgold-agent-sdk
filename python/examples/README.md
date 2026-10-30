@@ -31,7 +31,7 @@ The SDK itself ships **no serving runtime** - how an agent faces the world (A2A,
 - Python 3.10+
 - Testnet BTG ([faucet](https://faucet.bitgold.network))
 - `uv sync` or `pip install bitgold-agent`
-- Some of the deployed payment token (default: U, see address below)
+- Some of the deployed payment token (default: BTG)
 - TWAK examples (`twak/`, or `WALLET_KIND=twak` in `client/`) additionally need the twak CLI: `npm i -g @trustwallet/cli` (>= 0.20.0)
 
 ## Bitgold Testnet addresses (SDK defaults)

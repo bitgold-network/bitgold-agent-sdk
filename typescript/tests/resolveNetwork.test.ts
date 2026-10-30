@@ -44,8 +44,12 @@ describe("resolveNetwork precedence", () => {
     // One process can resolve BOTH networks to distinct pinned nodes.
     vi.stubEnv("RPC_URL_BITGOLD_TESTNET", "https://t.example.com");
     vi.stubEnv("RPC_URL_BITGOLD_MAINNET", "https://m.example.com");
-    expect(resolveNetwork("bitgold-testnet").rpcUrl).toBe("https://t.example.com");
-    expect(resolveNetwork("bitgold-mainnet").rpcUrl).toBe("https://m.example.com");
+    expect(resolveNetwork("bitgold-testnet").rpcUrl).toBe(
+      "https://t.example.com",
+    );
+    expect(resolveNetwork("bitgold-mainnet").rpcUrl).toBe(
+      "https://m.example.com",
+    );
   });
 
   it("localhost override disables the paymaster", () => {
@@ -69,21 +73,24 @@ describe("resolveNetwork precedence", () => {
   it("a remote RPC override inherits the preset's usePaymaster", () => {
     // Regression for BUG-023: a non-localhost override must NOT force the
     // paymaster on — it inherits whatever the preset declared.
-    vi.stubEnv("RPC_URL_BITGOLD_TESTNET", "https://bitgold-testnet.publicnode.com");
+    vi.stubEnv(
+      "RPC_URL_BITGOLD_TESTNET",
+      "https://bitgold-testnet.publicnode.com",
+    );
     const nc = resolveNetwork("bitgold-testnet");
     expect(nc.usePaymaster).toBe(NETWORKS["bitgold-testnet"].usePaymaster);
     expect(nc.rpcUrl).toBe("https://bitgold-testnet.publicnode.com");
   });
 
-  it("both presets stay sponsored by default (the paymaster IS the product)", () => {
+  it("neither preset sponsors gas: Bitgold has no paymaster relay", () => {
     // Product decision (BUG-022, reversed once and reverted): gasless-by-
     // default is the point of the paymaster — 0-tBTG onboarding. Flaky-relay
     // protection lives in the executor's self-pay fallback, relay broadcast
     // verification, and BITGOLD_AGENT_USE_PAYMASTER=0 — never in this default.
-    expect(NETWORKS["bitgold-testnet"].usePaymaster).toBe(true);
-    expect(NETWORKS["bitgold-testnet"].paymasterUrl).toBeTruthy();
-    expect(NETWORKS["bitgold-mainnet"].usePaymaster).toBe(true);
-    expect(NETWORKS["bitgold-mainnet"].paymasterUrl).toBeTruthy();
+    expect(NETWORKS["bitgold-testnet"].usePaymaster).toBe(false);
+    expect(NETWORKS["bitgold-testnet"].paymasterUrl).toBeUndefined();
+    expect(NETWORKS["bitgold-mainnet"].usePaymaster).toBe(false);
+    expect(NETWORKS["bitgold-mainnet"].paymasterUrl).toBeUndefined();
   });
 
   it("BITGOLD_AGENT_USE_PAYMASTER=0 disables the paymaster with no RPC override", () => {
@@ -98,7 +105,10 @@ describe("resolveNetwork precedence", () => {
   });
 
   it("BITGOLD_AGENT_USE_PAYMASTER=0 wins even under a remote override", () => {
-    vi.stubEnv("RPC_URL_BITGOLD_TESTNET", "https://bitgold-testnet.publicnode.com");
+    vi.stubEnv(
+      "RPC_URL_BITGOLD_TESTNET",
+      "https://bitgold-testnet.publicnode.com",
+    );
     vi.stubEnv("BITGOLD_AGENT_USE_PAYMASTER", "0");
     expect(resolveNetwork("bitgold-testnet").usePaymaster).toBe(false);
   });

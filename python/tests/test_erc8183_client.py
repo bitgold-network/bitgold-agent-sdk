@@ -107,7 +107,9 @@ class TestInit:
         fake_net = _fake_network()
         with (
             patch("bitgold_agent.erc8183.client.create_web3", return_value=mock_web3),
-            patch("bitgold_agent.erc8183.client.resolve_network", return_value=fake_net) as resolve,
+            patch(
+                "bitgold_agent.erc8183.client.resolve_network", return_value=fake_net
+            ) as resolve,
             patch("bitgold_agent.erc8183.client.CommerceClient") as mcc,
             patch("bitgold_agent.erc8183.client.RouterClient") as mrc,
             patch("bitgold_agent.erc8183.client.PolicyClient") as mpc,

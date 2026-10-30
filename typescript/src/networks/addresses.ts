@@ -35,7 +35,8 @@ export const PAYMENT_TOKEN_EIP712_NAME = "BTG";
 export const PAYMENT_TOKEN_EIP712_VERSION = "1";
 
 /** Placeholder used until the Bitgold Network deployments are published. */
-export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+export const ZERO_ADDRESS =
+  "0x0000000000000000000000000000000000000000" as const;
 
 /** Snapshot of one network's contract deployment. */
 export interface DeployedAddresses {
@@ -83,7 +84,8 @@ function build(): Record<number, DeployedAddresses> {
   return Object.freeze(out);
 }
 
-export const BITGOLD_CHAIN_ADDRESSES: Record<number, DeployedAddresses> = build();
+export const BITGOLD_CHAIN_ADDRESSES: Record<number, DeployedAddresses> =
+  build();
 
 /**
  * Return the deployment snapshot for `chainId`.

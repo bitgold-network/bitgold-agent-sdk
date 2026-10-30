@@ -37,12 +37,15 @@ describe("LocalStorageProvider", () => {
     expect(existsSync(base)).toBe(true);
   });
 
-  it("sets directory permissions to owner-only (0700)", () => {
-    const base = join(root, "storage");
-    new LocalStorageProvider(base);
-    const mode = statSync(base).mode & 0o777;
-    expect(mode).toBe(0o700);
-  });
+  it.skipIf(process.platform === "win32")(
+    "sets directory permissions to owner-only (0700)",
+    () => {
+      const base = join(root, "storage");
+      new LocalStorageProvider(base);
+      const mode = statSync(base).mode & 0o777;
+      expect(mode).toBe(0o700);
+    },
+  );
 
   it("upload returns a file:// URL", async () => {
     const provider = new LocalStorageProvider(join(root, "data"));
@@ -68,13 +71,16 @@ describe("LocalStorageProvider", () => {
     expect(url.endsWith(".json")).toBe(true);
   });
 
-  it("sets file permissions to owner read/write only (0600)", async () => {
-    const provider = new LocalStorageProvider(join(root, "data"));
-    await provider.upload({ key: "val" }, "test.json");
-    const filepath = join(root, "data", "test.json");
-    const mode = statSync(filepath).mode & 0o777;
-    expect(mode).toBe(0o600);
-  });
+  it.skipIf(process.platform === "win32")(
+    "sets file permissions to owner read/write only (0600)",
+    async () => {
+      const provider = new LocalStorageProvider(join(root, "data"));
+      await provider.upload({ key: "val" }, "test.json");
+      const filepath = join(root, "data", "test.json");
+      const mode = statSync(filepath).mode & 0o777;
+      expect(mode).toBe(0o600);
+    },
+  );
 
   it("round-trips data through upload/download", async () => {
     const provider = new LocalStorageProvider(join(root, "data"));

@@ -27,7 +27,8 @@
 import { getEnv } from "./core/envUtil.js";
 
 /** Placeholder used until the Bitgold Network deployments are published. */
-export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+export const ZERO_ADDRESS =
+  "0x0000000000000000000000000000000000000000" as const;
 
 /** Bitgold Mainnet / testnet chain ids. */
 export const BITGOLD_MAINNET_CHAIN_ID = 618;

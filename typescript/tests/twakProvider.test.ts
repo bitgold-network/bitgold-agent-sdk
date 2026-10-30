@@ -86,7 +86,7 @@ const EVALUATOR_ADDR = `0x${"22".repeat(20)}`;
 const POLICY_ADDR = `0x${"44".repeat(20)}`;
 const TOKEN_ADDR = `0x${"55".repeat(20)}`;
 const ZERO_ADDRESS = `0x${"00".repeat(20)}`;
-const PM_URL = "";
+const PM_URL = "https://paymaster.example.com";
 
 const TX_OUT = { success: true, hash: "0xfeed", chain: "bitgold" };
 const STATUS_OK = { agentWallet: "configured" };
@@ -216,14 +216,14 @@ describe("TWAKProvider — construction and capabilities", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("rejects non-Bitgold chains and the spec's bitgold-testnet spelling", () => {
+  it("accepts only Bitgold chains", () => {
     expect(() => new TWAKProvider({ chain: "ethereum" })).toThrow(
-      /BTG Smart Chain only/,
+      /Bitgold Network only/,
     );
-    expect(() => new TWAKProvider({ chain: "bitgold-testnet" })).toThrow(
-      /bitgold-testnet/,
+    expect(new TWAKProvider({ chain: "bitgold" }).chain).toBe("bitgold");
+    expect(new TWAKProvider({ chain: "bitgold-testnet" }).chain).toBe(
+      "bitgold-testnet",
     );
-    expect(new TWAKProvider({ chain: "bitgold-testnet" }).chain).toBe("bitgold-testnet");
   });
 
   it("declares {sign.message, broadcast.self, intents.*} — no raw signing, no x402.pay until requestExact exists", () => {
@@ -613,7 +613,10 @@ describe("TWAKProvider — erc8183 intent argv", () => {
 
   const customErc8183ContractCases = [
     [ERC8183_CREATE_JOB, NETWORKS["bitgold-mainnet"].commerceContract],
-    [ERC8183_CREATE_JOB_WITH_TOKEN, NETWORKS["bitgold-mainnet"].commerceContract],
+    [
+      ERC8183_CREATE_JOB_WITH_TOKEN,
+      NETWORKS["bitgold-mainnet"].commerceContract,
+    ],
     [ERC8183_SET_PROVIDER, NETWORKS["bitgold-mainnet"].commerceContract],
     [ERC8183_SET_BUDGET, NETWORKS["bitgold-mainnet"].commerceContract],
     [ERC8183_FUND, NETWORKS["bitgold-mainnet"].commerceContract],
@@ -701,7 +704,8 @@ describe("TWAKProvider — erc8183 intent argv", () => {
       new TWAKProvider().execute({
         name: ERC8004_REGISTER,
         call: {
-          address: NETWORKS["bitgold-mainnet"].registryContract as `0x${string}`,
+          address: NETWORKS["bitgold-mainnet"]
+            .registryContract as `0x${string}`,
           abi: [],
           functionName: "register",
           args: [],
@@ -1359,358 +1363,370 @@ const HONEST_PROMPT = {
 // can exceed vitest's 5 s default.
 const SPAWN_TIMEOUT = { timeout: 30_000 };
 
-describe("TwakX402Payer — twak's pre-signing prompt", SPAWN_TIMEOUT, () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "fake-twak-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
+// The fake CLI is a POSIX `/bin/sh` launcher, so this block only runs on
+// POSIX hosts (CI). On Windows the launcher cannot be spawned directly.
+describe.skipIf(process.platform === "win32")(
+  "TwakX402Payer — twak's pre-signing prompt",
+  SPAWN_TIMEOUT,
+  () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "fake-twak-"));
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
 
-  function fakeTwak(
-    prompt: Partial<typeof HONEST_PROMPT> = {},
-    env: Record<string, string> = {},
-  ): string {
-    const bin = join(dir, "twak");
-    writeFileSync(
-      bin,
-      `#!/bin/sh\nexec "${process.execPath}" "${FAKE_TWAK}" "$@"\n`,
-      { mode: 0o755 },
-    );
-    vi.stubEnv("FAKE_TWAK_QUOTE", JSON.stringify(QUOTE_OUT));
-    vi.stubEnv(
-      "FAKE_TWAK_PROMPT",
-      JSON.stringify({ ...HONEST_PROMPT, ...prompt }),
-    );
-    vi.stubEnv("FAKE_TWAK_LOG", join(dir, "log"));
-    for (const [key, value] of Object.entries(env)) {
-      vi.stubEnv(key, value);
+    function fakeTwak(
+      prompt: Partial<typeof HONEST_PROMPT> = {},
+      env: Record<string, string> = {},
+    ): string {
+      const bin = join(dir, "twak");
+      writeFileSync(
+        bin,
+        `#!/bin/sh\nexec "${process.execPath}" "${FAKE_TWAK}" "$@"\n`,
+        { mode: 0o755 },
+      );
+      vi.stubEnv("FAKE_TWAK_QUOTE", JSON.stringify(QUOTE_OUT));
+      vi.stubEnv(
+        "FAKE_TWAK_PROMPT",
+        JSON.stringify({ ...HONEST_PROMPT, ...prompt }),
+      );
+      vi.stubEnv("FAKE_TWAK_LOG", join(dir, "log"));
+      for (const [key, value] of Object.entries(env)) {
+        vi.stubEnv(key, value);
+      }
+      return bin;
     }
-    return bin;
-  }
 
-  function entries(): Record<string, unknown>[] {
-    const log = join(dir, "log");
-    return existsSync(log)
-      ? readFileSync(log, "utf8")
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => JSON.parse(line) as Record<string, unknown>)
-      : [];
-  }
+    function entries(): Record<string, unknown>[] {
+      const log = join(dir, "log");
+      return existsSync(log)
+        ? readFileSync(log, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+        : [];
+    }
 
-  const answers = () =>
-    entries()
-      .filter((e) => "answer" in e)
-      .map((e) => e.answer);
+    const answers = () =>
+      entries()
+        .filter((e) => "answer" in e)
+        .map((e) => e.answer);
 
-  function payer(
-    twakBin: string,
-    timeoutMs = 20_000,
-    allowUnverifiedCliVersion = false,
-  ) {
-    const budget = new SessionBudgetTracker({ [ASSET]: 10_000n });
-    const provider = new TWAKProvider({
-      twakBin,
-      timeoutMs,
-      allowUnverifiedCliVersion,
+    function payer(
+      twakBin: string,
+      timeoutMs = 20_000,
+      allowUnverifiedCliVersion = false,
+    ) {
+      const budget = new SessionBudgetTracker({ [ASSET]: 10_000n });
+      const provider = new TWAKProvider({
+        twakBin,
+        timeoutMs,
+        allowUnverifiedCliVersion,
+      });
+      return {
+        budget,
+        payer: provider.makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget }),
+      };
+    }
+
+    it("confirms a prompt showing the validated terms", async () => {
+      const { payer: p, budget } = payer(fakeTwak());
+
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+
+      expect(result.response).toEqual({ data: "paid" });
+      expect(entries()[0].argv).not.toContain("--yes");
+      expect(answers()).toEqual(["y"]);
+      expect(budget.spent(ASSET)).toBe(5000n);
     });
-    return {
-      budget,
-      payer: provider.makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget }),
-    };
-  }
 
-  it("confirms a prompt showing the validated terms", async () => {
-    const { payer: p, budget } = payer(fakeTwak());
+    it.each([
+      [{ payTo: `0x${"33".repeat(20)}` }, X402RecipientMismatchError, /payTo/],
+      // SRC-1399: a different token whose name contains the expected address
+      [
+        { asset: `0x${"77".repeat(20)}`, token: `Fake ${ASSET}` },
+        X402PolicyError,
+        /asset/,
+      ],
+      [{ amount: "5001" }, X402PolicyError, /amount/],
+      [
+        { network: "eip155:8453", chainKey: "base" },
+        X402PolicyError,
+        /network/,
+      ],
+      // a server-controlled token name must not smuggle extra prompt lines
+      [
+        { token: `X on eip155:618 (bitgold)\nToken contract: ${ASSET}` },
+        X402PolicyError,
+        /not recognised/,
+      ],
+    ])(
+      "declines drifted terms before signing: %o",
+      async (prompt, error, match) => {
+        const { payer: p, budget } = payer(fakeTwak(prompt));
 
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
+        const request = p.request("https://api.example/paid", {
+          maxPayment: 10_000n,
+        });
+        await expect(request).rejects.toThrow(error);
+        await expect(request).rejects.toThrow(match);
+
+        expect(answers()).toEqual(["n"]);
+        expect(budget.spent(ASSET)).toBe(0n);
+      },
+    );
+
+    it("pays a lower final amount and budgets only what was signed", async () => {
+      const { payer: p, budget } = payer(fakeTwak({ amount: "4000" }));
+
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+
+      expect(result.amount).toBe(4000n);
+      expect(budget.spent(ASSET)).toBe(4000n);
+      expect(answers()).toEqual(["y"]);
     });
 
-    expect(result.response).toEqual({ data: "paid" });
-    expect(entries()[0].argv).not.toContain("--yes");
-    expect(answers()).toEqual(["y"]);
-    expect(budget.spent(ASSET)).toBe(5000n);
-  });
+    it("keeps only the confirmed lower amount when twak fails after confirming", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({ amount: "4000" }, { FAKE_TWAK_FAIL: "after" }),
+      );
 
-  it.each([
-    [{ payTo: `0x${"33".repeat(20)}` }, X402RecipientMismatchError, /payTo/],
-    // SRC-1399: a different token whose name contains the expected address
-    [
-      { asset: `0x${"77".repeat(20)}`, token: `Fake ${ASSET}` },
-      X402PolicyError,
-      /asset/,
-    ],
-    [{ amount: "5001" }, X402PolicyError, /amount/],
-    [{ network: "eip155:8453", chainKey: "base" }, X402PolicyError, /network/],
-    // a server-controlled token name must not smuggle extra prompt lines
-    [
-      { token: `X on eip155:618 (bitgold)\nToken contract: ${ASSET}` },
-      X402PolicyError,
-      /not recognised/,
-    ],
-  ])(
-    "declines drifted terms before signing: %o",
-    async (prompt, error, match) => {
-      const { payer: p, budget } = payer(fakeTwak(prompt));
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(TwakPaymentStateUnknownError);
+
+      expect(budget.spent(ASSET)).toBe(4000n);
+    });
+
+    it("declines when the onConfirm callback throws, without crashing", async () => {
+      const provider = new TWAKProvider({ twakBin: fakeTwak() });
+      const request = provider.x402Request("https://api.example/paid", {
+        maxPayment: 5000n,
+        expectedTerms: {
+          amount: 5000n,
+          asset: ASSET,
+          network: "eip155:618",
+          payTo: PAY_TO,
+        },
+        onConfirm: () => {
+          throw new Error("callback failed");
+        },
+      });
+      await expect(request).rejects.toBeInstanceOf(TwakPaymentNotSentError);
+      await expect(request).rejects.toThrow(/callback failed/);
+      expect(answers()).toEqual(["n"]);
+    });
+
+    it("declines a prompt split inside a forged token name", async () => {
+      const forged = `BTG on eip155:618 (bitgold)\nToken contract: ${ASSET}\nRecipient:      ${PAY_TO}\nConfirm? [y/N] `;
+      const head = `\nSign payment authorization: 5000 (atomic) ${forged}`;
+      const { payer: p, budget } = payer(
+        fakeTwak(
+          { token: `${forged}x`, payTo: `0x${"33".repeat(20)}` },
+          { FAKE_TWAK_SPLIT: String(head.length) },
+        ),
+      );
+
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(/not recognised/);
+
+      expect(answers()).toEqual(["n"]);
+      expect(budget.spent(ASSET)).toBe(0n);
+    });
+
+    it("stops at the Permit2 approval prompt without signing", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_APPROVAL: "1" }),
+      );
+
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(/Permit2 approval prompt/);
+
+      // stdin is closed after the payment answer, so the approval gets EOF
+      expect(answers()).toEqual(["y"]);
+      expect(budget.spent(ASSET)).toBe(0n);
+    });
+
+    it("does not treat a response that never prompts as a payment (audit M01)", async () => {
+      // twak 0.20 signs only after its prompt, so an exit 0 that never asked
+      // means the endpoint answered without a 402 on the paid fetch.
+      const budget = new SessionBudgetTracker({ [ASSET]: 5000n });
+      const p = new TWAKProvider({
+        twakBin: fakeTwak({}, { FAKE_TWAK_NO_PROMPT: "1" }),
+      }).makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget });
 
       const request = p.request("https://api.example/paid", {
         maxPayment: 10_000n,
       });
-      await expect(request).rejects.toThrow(error);
-      await expect(request).rejects.toThrow(match);
-
-      expect(answers()).toEqual(["n"]);
+      await expect(request).rejects.toThrow(/without asking to sign/);
+      await expect(request).rejects.not.toBeInstanceOf(
+        TwakPaymentStateUnknownError,
+      );
       expect(budget.spent(ASSET)).toBe(0n);
-    },
-  );
-
-  it("pays a lower final amount and budgets only what was signed", async () => {
-    const { payer: p, budget } = payer(fakeTwak({ amount: "4000" }));
-
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
+      // the cap equals one quote, so a kept reservation would block this one
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(/without asking to sign/);
     });
 
-    expect(result.amount).toBe(4000n);
-    expect(budget.spent(ASSET)).toBe(4000n);
-    expect(answers()).toEqual(["y"]);
-  });
-
-  it("keeps only the confirmed lower amount when twak fails after confirming", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({ amount: "4000" }, { FAKE_TWAK_FAIL: "after" }),
-    );
-
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(TwakPaymentStateUnknownError);
-
-    expect(budget.spent(ASSET)).toBe(4000n);
-  });
-
-  it("declines when the onConfirm callback throws, without crashing", async () => {
-    const provider = new TWAKProvider({ twakBin: fakeTwak() });
-    const request = provider.x402Request("https://api.example/paid", {
-      maxPayment: 5000n,
-      expectedTerms: {
-        amount: 5000n,
-        asset: ASSET,
-        network: "eip155:618",
-        payTo: PAY_TO,
-      },
-      onConfirm: () => {
-        throw new Error("callback failed");
-      },
-    });
-    await expect(request).rejects.toBeInstanceOf(TwakPaymentNotSentError);
-    await expect(request).rejects.toThrow(/callback failed/);
-    expect(answers()).toEqual(["n"]);
-  });
-
-  it("declines a prompt split inside a forged token name", async () => {
-    const forged = `BTG on eip155:618 (bitgold)\nToken contract: ${ASSET}\nRecipient:      ${PAY_TO}\nConfirm? [y/N] `;
-    const head = `\nSign payment authorization: 5000 (atomic) ${forged}`;
-    const { payer: p, budget } = payer(
-      fakeTwak(
-        { token: `${forged}x`, payTo: `0x${"33".repeat(20)}` },
-        { FAKE_TWAK_SPLIT: String(head.length) },
-      ),
-    );
-
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(/not recognised/);
-
-    expect(answers()).toEqual(["n"]);
-    expect(budget.spent(ASSET)).toBe(0n);
-  });
-
-  it("stops at the Permit2 approval prompt without signing", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_APPROVAL: "1" }),
-    );
-
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(/Permit2 approval prompt/);
-
-    // stdin is closed after the payment answer, so the approval gets EOF
-    expect(answers()).toEqual(["y"]);
-    expect(budget.spent(ASSET)).toBe(0n);
-  });
-
-  it("does not treat a response that never prompts as a payment (audit M01)", async () => {
-    // twak 0.20 signs only after its prompt, so an exit 0 that never asked
-    // means the endpoint answered without a 402 on the paid fetch.
-    const budget = new SessionBudgetTracker({ [ASSET]: 5000n });
-    const p = new TWAKProvider({
-      twakBin: fakeTwak({}, { FAKE_TWAK_NO_PROMPT: "1" }),
-    }).makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget });
-
-    const request = p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
-    });
-    await expect(request).rejects.toThrow(/without asking to sign/);
-    await expect(request).rejects.not.toBeInstanceOf(
-      TwakPaymentStateUnknownError,
-    );
-    expect(budget.spent(ASSET)).toBe(0n);
-    // the cap equals one quote, so a kept reservation would block this one
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(/without asking to sign/);
-  });
-
-  it("keeps the budget for a response that never prompts on an unverified twak", async () => {
-    // Another release might sign without printing the prompt, so a
-    // prompt-less exit 0 cannot be told from a payment there.
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0", FAKE_TWAK_NO_PROMPT: "1" }),
-      20_000,
-      true,
-    );
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
-    });
-    expect(result.response).toEqual({ data: "paid" });
-    expect(budget.spent(ASSET)).toBe(5000n);
-  });
-
-  // ── the twak release the prompt check was verified on ──
-
-  it("refuses an unverified twak release before paying", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0" }),
-    );
-
-    const request = p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
-    });
-    await expect(request).rejects.toThrow(/twak 0\.21\.0 is not verified/);
-    await expect(request).rejects.not.toBeInstanceOf(TwakPaymentNotSentError);
-
-    expect(entries().filter((e) => "argv" in e)).toEqual([]);
-    expect(budget.spent(ASSET)).toBe(0n);
-  });
-
-  it("pays with an unverified twak release only when allowed explicitly", async () => {
-    const { payer: p } = payer(
-      fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0" }),
-      20_000,
-      true,
-    );
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
-    });
-    expect(result.response).toEqual({ data: "paid" });
-  });
-
-  it("pays with an unverified twak release when allowed by environment", async () => {
-    const { payer: p } = payer(
-      fakeTwak(
-        {},
-        {
-          FAKE_TWAK_VERSION: "0.21.0",
-          BITGOLD_AGENT_TWAK_ALLOW_UNVERIFIED_CLI: "1",
-        },
-      ),
-    );
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
-    });
-    expect(result.response).toEqual({ data: "paid" });
-  });
-
-  it("checks the twak version once per provider", async () => {
-    const checks = join(dir, "versions.log");
-    const { payer: p } = payer(fakeTwak({}, { FAKE_TWAK_VERSION_LOG: checks }));
-
-    await p.request("https://api.example/paid", { maxPayment: 10_000n });
-    await p.request("https://api.example/paid", { maxPayment: 10_000n });
-
-    expect(readFileSync(checks, "utf8").split("\n").filter(Boolean)).toEqual([
-      "version",
-    ]);
-  });
-
-  // ── session budget follows the payment phase (SRC-1348) ──
-
-  it.each([
-    [{ error: "credit top-up failed" }],
-    [{ success: false }],
-    [[1, 2]],
-    [null],
-  ])("keeps the budget spent for a paid error body %j", async (body) => {
-    const budget = new SessionBudgetTracker({ [ASSET]: 5000n });
-    const p = new TWAKProvider({
-      twakBin: fakeTwak({}, { FAKE_TWAK_BODY: JSON.stringify(body) }),
-    }).makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget });
-
-    const result = await p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
+    it("keeps the budget for a response that never prompts on an unverified twak", async () => {
+      // Another release might sign without printing the prompt, so a
+      // prompt-less exit 0 cannot be told from a payment there.
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0", FAKE_TWAK_NO_PROMPT: "1" }),
+        20_000,
+        true,
+      );
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      expect(result.response).toEqual({ data: "paid" });
+      expect(budget.spent(ASSET)).toBe(5000n);
     });
 
-    expect(result.response).toEqual(body);
-    expect(result.transaction).toBeUndefined();
-    expect(budget.spent(ASSET)).toBe(5000n);
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(X402BudgetExhaustedError);
-  });
+    // ── the twak release the prompt check was verified on ──
 
-  it("releases the budget when twak fails before the confirmation", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_FAIL: "before" }),
-    );
+    it("refuses an unverified twak release before paying", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0" }),
+      );
 
-    const request = p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
+      const request = p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      await expect(request).rejects.toThrow(/twak 0\.21\.0 is not verified/);
+      await expect(request).rejects.not.toBeInstanceOf(TwakPaymentNotSentError);
+
+      expect(entries().filter((e) => "argv" in e)).toEqual([]);
+      expect(budget.spent(ASSET)).toBe(0n);
     });
-    await expect(request).rejects.toThrow(/exceeds --max-payment/);
-    await expect(request).rejects.not.toBeInstanceOf(TwakPaymentNotSentError);
 
-    expect(answers()).toEqual([]);
-    expect(budget.spent(ASSET)).toBe(0n);
-  });
-
-  it("keeps the budget when twak fails after the confirmation", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_FAIL: "after" }),
-    );
-
-    await expect(
-      p.request("https://api.example/paid", { maxPayment: 10_000n }),
-    ).rejects.toThrow(TwakPaymentStateUnknownError);
-
-    expect(budget.spent(ASSET)).toBe(5000n);
-  });
-
-  it("keeps the budget when a confirmed request times out", async () => {
-    const { payer: p, budget } = payer(
-      fakeTwak({}, { FAKE_TWAK_HANG: "1" }),
-      2_000,
-    );
-
-    const request = p.request("https://api.example/paid", {
-      maxPayment: 10_000n,
+    it("pays with an unverified twak release only when allowed explicitly", async () => {
+      const { payer: p } = payer(
+        fakeTwak({}, { FAKE_TWAK_VERSION: "0.21.0" }),
+        20_000,
+        true,
+      );
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      expect(result.response).toEqual({ data: "paid" });
     });
-    await expect(request).rejects.toThrow(TwakPaymentStateUnknownError);
-    await expect(request).rejects.toThrow(/timed out/);
 
-    expect(budget.spent(ASSET)).toBe(5000n);
-  });
+    it("pays with an unverified twak release when allowed by environment", async () => {
+      const { payer: p } = payer(
+        fakeTwak(
+          {},
+          {
+            FAKE_TWAK_VERSION: "0.21.0",
+            BITGOLD_AGENT_TWAK_ALLOW_UNVERIFIED_CLI: "1",
+          },
+        ),
+      );
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      expect(result.response).toEqual({ data: "paid" });
+    });
 
-  it("keeps --yes when the provider is called without expected terms", async () => {
-    const provider = new TWAKProvider({ twakBin: fakeTwak() });
-    await expect(
-      provider.x402Request("https://api.example/paid", { maxPayment: 5 }),
-    ).resolves.toEqual({ data: "paid" });
-    expect(entries()[0].argv).toContain("--yes");
-  });
-});
+    it("checks the twak version once per provider", async () => {
+      const checks = join(dir, "versions.log");
+      const { payer: p } = payer(
+        fakeTwak({}, { FAKE_TWAK_VERSION_LOG: checks }),
+      );
+
+      await p.request("https://api.example/paid", { maxPayment: 10_000n });
+      await p.request("https://api.example/paid", { maxPayment: 10_000n });
+
+      expect(readFileSync(checks, "utf8").split("\n").filter(Boolean)).toEqual([
+        "version",
+      ]);
+    });
+
+    // ── session budget follows the payment phase (SRC-1348) ──
+
+    it.each([
+      [{ error: "credit top-up failed" }],
+      [{ success: false }],
+      [[1, 2]],
+      [null],
+    ])("keeps the budget spent for a paid error body %j", async (body) => {
+      const budget = new SessionBudgetTracker({ [ASSET]: 5000n });
+      const p = new TWAKProvider({
+        twakBin: fakeTwak({}, { FAKE_TWAK_BODY: JSON.stringify(body) }),
+      }).makeX402Payer({ ...PAYER_OPTS, sessionBudget: budget });
+
+      const result = await p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+
+      expect(result.response).toEqual(body);
+      expect(result.transaction).toBeUndefined();
+      expect(budget.spent(ASSET)).toBe(5000n);
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(X402BudgetExhaustedError);
+    });
+
+    it("releases the budget when twak fails before the confirmation", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_FAIL: "before" }),
+      );
+
+      const request = p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      await expect(request).rejects.toThrow(/exceeds --max-payment/);
+      await expect(request).rejects.not.toBeInstanceOf(TwakPaymentNotSentError);
+
+      expect(answers()).toEqual([]);
+      expect(budget.spent(ASSET)).toBe(0n);
+    });
+
+    it("keeps the budget when twak fails after the confirmation", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_FAIL: "after" }),
+      );
+
+      await expect(
+        p.request("https://api.example/paid", { maxPayment: 10_000n }),
+      ).rejects.toThrow(TwakPaymentStateUnknownError);
+
+      expect(budget.spent(ASSET)).toBe(5000n);
+    });
+
+    it("keeps the budget when a confirmed request times out", async () => {
+      const { payer: p, budget } = payer(
+        fakeTwak({}, { FAKE_TWAK_HANG: "1" }),
+        2_000,
+      );
+
+      const request = p.request("https://api.example/paid", {
+        maxPayment: 10_000n,
+      });
+      await expect(request).rejects.toThrow(TwakPaymentStateUnknownError);
+      await expect(request).rejects.toThrow(/timed out/);
+
+      expect(budget.spent(ASSET)).toBe(5000n);
+    });
+
+    it("keeps --yes when the provider is called without expected terms", async () => {
+      const provider = new TWAKProvider({ twakBin: fakeTwak() });
+      await expect(
+        provider.x402Request("https://api.example/paid", { maxPayment: 5 }),
+      ).resolves.toEqual({ data: "paid" });
+      expect(entries()[0].argv).toContain("--yes");
+    });
+  },
+);
 
 // ── config wiring ──
 
@@ -1721,12 +1737,14 @@ describe("ERC8183Config — walletKind twak", () => {
       network: "bitgold-testnet",
     });
     expect(config.walletProvider).toBeInstanceOf(TWAKProvider);
-    expect((config.walletProvider as TWAKProvider).chain).toBe("bitgold-testnet");
+    expect((config.walletProvider as TWAKProvider).chain).toBe(
+      "bitgold-testnet",
+    );
   });
 
   it("rejects non-BTG networks for the twak kind", () => {
     expect(
       () => new ERC8183Config({ walletKind: "twak", network: "local" }),
-    ).toThrow(/BTG Smart Chain networks only/);
+    ).toThrow(/Bitgold Network networks only/);
   });
 });

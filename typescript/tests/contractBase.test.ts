@@ -350,7 +350,7 @@ describe("sendTx: gas-price floor", () => {
   it("floors at 1 gwei on testnet when the network price is far below it", async () => {
     const { contract, wallet } = makeContract({
       handlers: {
-        eth_chainId: () => "0x61", // 617
+        eth_chainId: () => "0x269", // 617
         eth_gasPrice: () => "0x64", // 100 wei
       },
     });
@@ -361,7 +361,7 @@ describe("sendTx: gas-price floor", () => {
   it("uses the network price (+20%) when it is above the floor", async () => {
     const { contract, wallet } = makeContract({
       handlers: {
-        eth_chainId: () => "0x61", // 617
+        eth_chainId: () => "0x269", // 617
         eth_gasPrice: () => "0x12a05f200", // 5 Gwei
       },
     });

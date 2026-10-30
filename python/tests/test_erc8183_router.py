@@ -11,7 +11,8 @@ def router_client(mock_web3):
     wallet = MagicMock()
     wallet.address = "0x" + "aa" * 20
     with patch(
-        "bitgold_agent.erc8183.router._load_abi", return_value=[{"type": "function", "name": "settle"}]
+        "bitgold_agent.erc8183.router._load_abi",
+        return_value=[{"type": "function", "name": "settle"}],
     ):
         client = RouterClient(mock_web3, "0x" + "11" * 20, wallet)
         client._execute_intent = MagicMock()

@@ -32,7 +32,9 @@ def _make_contract(web3=None, paymaster=None):
     )
 
     with patch.object(ContractInterface, "_get_default_abi", return_value=[]):
-        with patch("bitgold_agent.erc8004.contract.Web3.to_checksum_address", side_effect=lambda x: x):
+        with patch(
+            "bitgold_agent.erc8004.contract.Web3.to_checksum_address", side_effect=lambda x: x
+        ):
             ci = ContractInterface(
                 web3=web3,
                 contract_address=FAKE_CONTRACT_ADDRESS,

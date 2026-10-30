@@ -38,7 +38,9 @@ import type { NetworkConfig } from "../src/config.js";
 import { StorageProvider } from "../src/storage/storageProvider.js";
 import { WalletProvider } from "../src/wallets/walletProvider.js";
 
-const FAKE_HOME = mkdtempSync(join(tmpdir(), "bitgold_agent-erc8183-config-home-"));
+const FAKE_HOME = mkdtempSync(
+  join(tmpdir(), "bitgold_agent-erc8183-config-home-"),
+);
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -105,7 +107,9 @@ beforeEach(() => {
     saved[key] = process.env[key];
     delete process.env[key];
   }
-  const root = mkdtempSync(join(tmpdir(), "bitgold_agent-erc8183-config-test-"));
+  const root = mkdtempSync(
+    join(tmpdir(), "bitgold_agent-erc8183-config-test-"),
+  );
   wdir = join(root, "wallets");
 });
 

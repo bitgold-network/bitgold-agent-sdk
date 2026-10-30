@@ -45,7 +45,9 @@ describe("Tier 1 public API (src/index.ts)", () => {
       expect(typeof cls, `${name} should be a class`).toBe("function");
     }
     expect(new Tier1.BitgoldAgentError("x")).toBeInstanceOf(Error);
-    expect(new Tier1.ContractError("x")).toBeInstanceOf(Tier1.BitgoldAgentError);
+    expect(new Tier1.ContractError("x")).toBeInstanceOf(
+      Tier1.BitgoldAgentError,
+    );
     expect(new Tier1.RpcRangeLimitError("x")).toBeInstanceOf(
       Tier1.NetworkError,
     );

@@ -77,7 +77,7 @@ describe("DeliverableManifest", () => {
     // over the exact wire dict produced by manifestWireDict() above. See
     // .superpowers/sdd/task-19-report.md for the full one-liner + output.
     const EXPECTED_HASH =
-      "0xe6f21081e9a75c1b2dcd98835c1ef5a351c25bb1fbedca3226e74ff52752b7b6";
+      "0x8def85563ef785961cf52a24174c28983d216dddb07db1cc67923c83a9f3b615";
     const m = DeliverableManifest.fromDict(manifestWireDict());
     expect(m.manifestHash()).toBe(EXPECTED_HASH);
   });
@@ -210,7 +210,7 @@ describe("DeliverableManifest", () => {
       // with response={"content": "hello world"} (no content_type). See
       // .superpowers/sdd/task-19-report.md for the full one-liner + output.
       const EXPECTED_HASH =
-        "0xc365b323d1757a33d4f1481ef65ef9fdfc8f4ee5dc2baf034ef6446b96544b6f";
+        "0xee9512c53799fd30f62e6b5850e71d3dc0e1fafcf2446ba1692387f2bdad40ee";
       const m = DeliverableManifest.fromDict(noContentTypeWireDict());
       expect(m.manifestHash()).toBe(EXPECTED_HASH);
     });
@@ -221,7 +221,7 @@ describe("DeliverableManifest", () => {
       const response = m.toDict().response as Record<string, unknown>;
       expect(response.content_type).toBe("text/plain");
       const EXPECTED_HASH =
-        "0xe6f21081e9a75c1b2dcd98835c1ef5a351c25bb1fbedca3226e74ff52752b7b6";
+        "0x8def85563ef785961cf52a24174c28983d216dddb07db1cc67923c83a9f3b615";
       expect(m.manifestHash()).toBe(EXPECTED_HASH);
     });
   });

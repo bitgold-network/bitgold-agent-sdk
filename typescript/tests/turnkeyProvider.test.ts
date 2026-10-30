@@ -176,7 +176,7 @@ function eip3009Fixture() {
 function extendedPolicy(): SigningPolicy {
   return SigningPolicy.strictDefault().extend({
     domainAllowlist: [
-      [97, TEST_DOMAIN.verifyingContract as `0x${string}`],
+      [617, TEST_DOMAIN.verifyingContract as `0x${string}`],
     ] as const,
   });
 }
@@ -495,7 +495,7 @@ describe("signTransaction", () => {
     expect(parsed.gasPrice).toBe(legacyTx.gasPrice);
     expect(signed.hash).toBe(keccak256(signed.rawTransaction));
     // EIP-155 v for chainId 617: 2*617 + 35/36.
-    expect([229n, 230n]).toContain(signed.v);
+    expect([2n * 617n + 35n, 2n * 617n + 36n]).toContain(signed.v);
     expect(signed.r).toMatch(/^0x/);
     expect(signed.s).toMatch(/^0x/);
   });

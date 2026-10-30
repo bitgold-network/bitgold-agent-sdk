@@ -12,7 +12,9 @@ Tier 1 (public API — available via ``from bitgold_agent import ...``):
     set_default_receipt_timeout, get_default_receipt_timeout, set_min_gas_price_wei
 
 Tier 2 (import from subpackage):
-    from bitgold_agent.erc8183 import CommerceClient, RouterClient, PolicyClient, NegotiationHandler
+    from bitgold_agent.erc8183 import (
+        CommerceClient, RouterClient, PolicyClient, NegotiationHandler,
+    )
     from bitgold_agent.erc8183 import ERC8183JobOps, funded_job_watcher
     from bitgold_agent.erc8183.config import ERC8183Config
     from bitgold_agent.utils import SlidingWindowLimiter, RateLimitExceeded

@@ -229,7 +229,9 @@ def _build_payment_envelope(accept: dict[str, Any], msg: dict[str, Any], signatu
 
 def main() -> int:
     log.info("x402 buyer demo — off-chain signing round-trip")
-    log.info("Network: Bitgold Testnet (chainId=%d), U token=%s", BITGOLD_TESTNET_CHAIN_ID, U_TESTNET)
+    log.info(
+        "Network: Bitgold Testnet (chainId=%d), U token=%s", BITGOLD_TESTNET_CHAIN_ID, U_TESTNET
+    )
 
     # 1. Spin up the mock seller on loopback.
     server, base_url = _start_server()

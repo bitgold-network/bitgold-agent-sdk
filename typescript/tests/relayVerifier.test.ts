@@ -40,15 +40,18 @@ describe("resolveFallbackRpcUrls", () => {
       "BITGOLD_AGENT_FALLBACK_RPC_URLS",
       " https://x.example , https://y.example ,",
     );
-    expect(resolveFallbackRpcUrls({ chainId: BITGOLD_TESTNET_CHAIN_ID })).toEqual([
-      "https://x.example",
-      "https://y.example",
-    ]);
+    expect(
+      resolveFallbackRpcUrls({ chainId: BITGOLD_TESTNET_CHAIN_ID }),
+    ).toEqual(["https://x.example", "https://y.example"]);
   });
 
   it("falls back to the built-in per-chain table", () => {
-    const testnet = resolveFallbackRpcUrls({ chainId: BITGOLD_TESTNET_CHAIN_ID });
-    const mainnet = resolveFallbackRpcUrls({ chainId: BITGOLD_MAINNET_CHAIN_ID });
+    const testnet = resolveFallbackRpcUrls({
+      chainId: BITGOLD_TESTNET_CHAIN_ID,
+    });
+    const mainnet = resolveFallbackRpcUrls({
+      chainId: BITGOLD_MAINNET_CHAIN_ID,
+    });
     expect(testnet.length).toBeGreaterThan(0);
     expect(mainnet.length).toBeGreaterThan(0);
     expect(testnet.every((u) => u.startsWith("https://"))).toBe(true);

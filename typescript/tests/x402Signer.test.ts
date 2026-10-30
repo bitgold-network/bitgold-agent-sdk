@@ -36,8 +36,8 @@ const PK = `0x${"a".repeat(64)}` as const;
 const U_MAINNET = getAddress(BITGOLD_MAINNET_CHAIN_ID).paymentToken;
 const USD1_MAINNET = "0x0000000000000000000000000000000000000000" as const;
 
-const U_EIP3009_ROUTE = resolveExpectedEip3009Route("eip155:618", "U");
-const USD1_EIP3009_ROUTE = resolveExpectedEip3009Route("eip155:618", "USD1");
+const U_EIP3009_ROUTE = resolveExpectedEip3009Route("eip155:618", "BTG");
+const USD1_EIP3009_ROUTE = resolveExpectedEip3009Route("eip155:618", "BTG");
 
 const EIP712DOMAIN_FIELDS = [
   { name: "name", type: "string" },
@@ -792,7 +792,7 @@ describe("paymentOptionFromCli", () => {
       network: "eip155:618",
       scheme: "exact",
       asset: U_MAINNET,
-      tokenName: "U",
+      tokenName: "BTG",
       amount: "500000",
       payTo: `0x${"b".repeat(40)}`,
       transferMethod: "eip3009",
@@ -805,7 +805,7 @@ describe("paymentOptionFromCli", () => {
       network: "eip155:618",
       scheme: "exact",
       asset: U_MAINNET,
-      tokenName: "U",
+      tokenName: "BTG",
       amount: 500_000n,
       payTo: `0x${"b".repeat(40)}`,
       transferMethod: "eip3009",
@@ -875,7 +875,7 @@ describe("paymentOptionFromCli", () => {
       network: "eip155:618",
       scheme: "exact",
       asset: U_MAINNET,
-      tokenName: "U",
+      tokenName: "BTG",
       amount: "500000",
       payTo: `0x${"b".repeat(40)}`,
       transferMethod: "eip3009",
@@ -888,7 +888,7 @@ describe("paymentOptionFromCli", () => {
       network: "eip155:618",
       scheme: "exact",
       asset: U_MAINNET,
-      tokenName: "U",
+      tokenName: "BTG",
       amount: 500_000n,
       payTo: `0x${"b".repeat(40)}`,
       transferMethod: "eip3009",

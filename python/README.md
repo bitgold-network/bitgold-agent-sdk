@@ -382,7 +382,7 @@ The choice is made in code (e.g. `examples/agent-server/src/service.py`); there 
 
 ### Bitgold Testnet (Chain ID 617) - not deployed yet
 
-The ERC-8004 registry, the ERC-8183 stack and the BTG ERC-20 payment token are not deployed on Bitgold yet, so every address below is the zero-address placeholder. Fill them in through `ERC8004_REGISTRY_ADDRESS` / `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or by editing the presets) once the deployment is live.
+The ERC-8004 registry and the ERC-8183 stack are not deployed on Bitgold yet, so their addresses below are zero-address placeholders. Fill them in through `ERC8004_REGISTRY_ADDRESS` / `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or by editing the presets) once the deployment is live.
 
 | Contract                     | Address                                      |
 | ---------------------------- | -------------------------------------------- |
@@ -439,7 +439,7 @@ such.
 
 ### EIP-712 typed-data signing (`SigningPolicy`)
 
-`EVMWalletProvider.sign_typed_data` is **policy-gated by default**. Without explicit configuration, the wallet only accepts EIP-3009 `TransferWithAuthorization` / `ReceiveWithAuthorization` against catalog-verified B402 domains: BTG on Bitgold Mainnet and tBTG on Bitgold Testnet. Both catalog entries are `availability="placeholder"` until the BTG ERC-20 deployment (and its verified EIP-712 domain) is filled in, so the strict default currently denies every EIP-3009 domain. All Permit variants (ERC-2612 `Permit`, Permit2 `PermitSingle`/`PermitBatch`) are denylisted - even if your own code mistakenly allowlists them, the denylist wins.
+`EVMWalletProvider.sign_typed_data` is **policy-gated by default**. Without explicit configuration, the wallet only accepts EIP-3009 `TransferWithAuthorization` / `ReceiveWithAuthorization` against catalog-verified B402 domains: BTG on Bitgold Mainnet and tBTG on Bitgold Testnet. Both catalog entries currently point at the documented placeholder token address (`0x000000000000000000000000000000000000B706`), so the strict default allows exactly those two domains and nothing else. Replace the placeholder with the deployed BTG ERC-20 (and its verified EIP-712 name/version) before moving real funds. All Permit variants (ERC-2612 `Permit`, Permit2 `PermitSingle`/`PermitBatch`) are denylisted - even if your own code mistakenly allowlists them, the denylist wins.
 
 The threat: an ERC-20 `Permit` grants an unbounded allowance. Without `SigningPolicy`, an LLM agent receiving a 402 challenge from a malicious server could be talked into signing one, draining the wallet over time. The default policy refuses unconditionally; you opt in explicitly when you know what you're signing.
 
@@ -449,8 +449,8 @@ The threat: an ERC-20 `Permit` grants an unbounded allowance. Without `SigningPo
 from bitgold_agent import EVMWalletProvider, X402Signer
 from bitgold_agent.x402 import resolve_expected_eip3009_route
 
-# Raises PaymentAssetUnavailableError while the catalog entry is a placeholder:
-# fill in the BTG ERC-20 deployment address and EIP-712 domain first.
+# BTG resolves through the catalog; the address is the documented placeholder
+# until the BTG ERC-20 deployment replaces it.
 BTG_ROUTE = resolve_expected_eip3009_route("eip155:618", "BTG")
 BTG = BTG_ROUTE.address
 
@@ -501,10 +501,9 @@ wallet = EVMWalletProvider(
 wallet = EVMWalletProvider(password=...)
 print(wallet.signing_policy)
 # SigningPolicy(
-#   domain_allowlist (3 entries):
-#     - chain_id=618 verifyingContract=0x0000000000000000000000000000000000000000
-#     - chain_id=618 verifyingContract=0x0000000000000000000000000000000000000000
-#     - chain_id=617 verifyingContract=0x0000000000000000000000000000000000000000
+#   domain_allowlist (2 entries):
+#     - chain_id=618 verifyingContract=0x000000000000000000000000000000000000B706
+#     - chain_id=617 verifyingContract=0x000000000000000000000000000000000000B706
 #   primary_type_allowlist=['ReceiveWithAuthorization', 'TransferWithAuthorization']
 #   primary_type_denylist=['Permit', 'PermitBatch', 'PermitSingle']
 #   validity: window<=600s, future<=900s, required_for=[...]

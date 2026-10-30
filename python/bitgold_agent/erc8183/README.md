@@ -217,7 +217,7 @@ Contract-address overrides are **not** fields - pass either a `NetworkConfig(...
 | `STORAGE_PROVIDER` | No | `"local"` (default) or `"ipfs"`. |
 | `STORAGE_API_KEY` | If IPFS | Pinning-service JWT. |
 
-The payment token address is **not** configurable - it is fetched from `commerce.paymentToken()` at runtime and cached. The ERC-8183 stack and the BTG ERC-20 payment token are not deployed on Bitgold yet: the presets carry the zero address until `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or edited presets) point at a live deployment, and every write self-pays gas in BTG.
+The payment token address is **not** configurable - it is fetched from `commerce.paymentToken()` at runtime and cached. The ERC-8183 stack is not deployed on Bitgold yet, so the presets carry the zero address until `ERC8183_COMMERCE_ADDRESS` / `ERC8183_ROUTER_ADDRESS` / `ERC8183_POLICY_ADDRESS` (or edited presets) point at a live deployment, and every write self-pays gas in BTG. The BTG ERC-20 catalog entry is pinned to the documented placeholder `0x000000000000000000000000000000000000B706` until that deployment exists.
 
 ## Related
 

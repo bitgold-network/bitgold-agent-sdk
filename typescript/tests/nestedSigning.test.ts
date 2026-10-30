@@ -221,7 +221,7 @@ describe("nested EIP-712 signing", () => {
   });
   it("retains denylist precedence for newly supported nested Permit2 types", () => {
     const policy = SigningPolicy.strictDefault().extend({
-      domainAllowlist: [[56, permit2]],
+      domainAllowlist: [[618, permit2]],
       primaryTypeAllowlist: ["PermitSingle"],
     });
     expect(() =>
@@ -242,7 +242,7 @@ describe("nested EIP-712 signing", () => {
       privateKey: "11".repeat(32),
       persist: false,
       signingPolicy: SigningPolicy.strictDefault().extend({
-        domainAllowlist: [[56, permit2]],
+        domainAllowlist: [[618, permit2]],
         primaryTypeAllowlist: ["PermitWitnessTransferFrom"],
       }),
     });

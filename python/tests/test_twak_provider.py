@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -50,6 +51,10 @@ from bitgold_agent.wallets.intents import (
     Intent,
 )
 from tests.conftest import FAKE_ADDRESS, FAKE_CONTRACT_ADDRESS
+
+posix_paths_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="asserts POSIX path spellings"
+)
 
 # Canonical twak --json outputs (field-verified v0.18.0 shapes).
 _REGISTER_OUT = {
@@ -126,7 +131,9 @@ def _make_twak_contract(twak):
     web3 = MagicMock()
     web3.provider.endpoint_uri = "https://fake-rpc.example.com"
     with patch.object(ContractInterface, "_get_default_abi", return_value=[]):
-        with patch("bitgold_agent.erc8004.contract.Web3.to_checksum_address", side_effect=lambda x: x):
+        with patch(
+            "bitgold_agent.erc8004.contract.Web3.to_checksum_address", side_effect=lambda x: x
+        ):
             ci = ContractInterface(
                 web3=web3,
                 contract_address=FAKE_CONTRACT_ADDRESS,
@@ -162,16 +169,9 @@ def test_fund_bundles_approval_is_true():
     assert TWAKProvider.fund_bundles_approval is True
 
 
-def test_non_bsc_chain_rejected():
-    with pytest.raises(ValueError, match="BTG Smart Chain only"):
+def test_non_bitgold_chain_rejected():
+    with pytest.raises(ValueError, match="Bitgold Network only"):
         TWAKProvider(chain="ethereum")
-
-
-def test_spec_spelling_bsc_testnet_rejected():
-    # The spec says "bitgold-testnet" but the real CLI rejects it with
-    # CHAIN_UNSUPPORTED — the constructor must catch it and name the fix.
-    with pytest.raises(ValueError, match="bitgold-testnet"):
-        TWAKProvider(chain="bitgold-testnet")
 
 
 def test_bitgold_testnet_accepted_and_passed_through():
@@ -194,7 +194,7 @@ def test_make_executor_returns_self():
     assert twak.make_executor(ExecutionContext(web3=MagicMock())) is twak
 
 
-_PAYMASTER_URL = ""
+_PAYMASTER_URL = "https://paymaster.example.com"
 
 
 def _paymaster(url=_PAYMASTER_URL):
@@ -463,7 +463,10 @@ def test_register_atomic_metadata_flags_and_field_mapping():
             kwargs={
                 "agent_uri": "https://agent.example/card.json",
                 "metadata": [
-                    {"key": "built_with", "value": "https://github.com/bitgold-network/bitgold-agent-sdk#v1"},
+                    {
+                        "key": "built_with",
+                        "value": "https://github.com/bitgold-network/bitgold-agent-sdk#v1",
+                    },
                     {"key": "foo", "value": "bar"},
                 ],
             },
@@ -1111,7 +1114,9 @@ def test_nonzero_exit_raises_runtime_error():
 
 def test_missing_binary_raises_helpful_error():
     twak = TWAKProvider()
-    with patch("bitgold_agent.wallets.twak_provider.subprocess.run", side_effect=FileNotFoundError()):
+    with patch(
+        "bitgold_agent.wallets.twak_provider.subprocess.run", side_effect=FileNotFoundError()
+    ):
         with pytest.raises(RuntimeError, match="twak CLI not found"):
             twak.address  # noqa: B018 - property access triggers the lookup
 
@@ -1340,6 +1345,7 @@ def test_create_wallet_explicit_idempotent():
 # ── custody: home relocation (design §4, gaps S-5) ──
 
 
+@posix_paths_only
 def test_home_overrides_subprocess_home_inheriting_environ():
     twak = TWAKProvider(home="/srv/agent-7")
     with patch("bitgold_agent.wallets.twak_provider.subprocess.run") as run:
@@ -1354,6 +1360,7 @@ def test_home_overrides_subprocess_home_inheriting_environ():
     assert env == {**os.environ, "HOME": "/srv/agent-7"}
 
 
+@posix_paths_only
 def test_home_accepts_path_object():
     twak = TWAKProvider(home=Path("/srv/agent-8"))
     with patch("bitgold_agent.wallets.twak_provider.subprocess.run") as run:
@@ -1478,7 +1485,7 @@ def test_x402_quote_argv_includes_method_and_body_only_when_given():
 
     def run(cmd, **kwargs):
         calls.append(cmd)
-        return _completed(cmd, _x402_fixture("quote_bsc_u.json"))
+        return _completed(cmd, _x402_fixture("quote_bitgold_u.json"))
 
     twak = TWAKProvider()
     with patch("bitgold_agent.wallets.twak_provider.subprocess.run", side_effect=run):

@@ -21,7 +21,13 @@ afterEach(() => {
 
 describe("buyer purchase authorization", () => {
   it.each([
-    { price: "1000", chain: 617, token: TOKEN, maximum: "1000", accepted: true },
+    {
+      price: "1000",
+      chain: 617,
+      token: TOKEN,
+      maximum: "1000",
+      accepted: true,
+    },
     {
       price: "1001",
       chain: 617,
@@ -44,7 +50,13 @@ describe("buyer purchase authorization", () => {
       accepted: false,
     },
     { price: "1000", chain: 617, token: TOKEN, maximum: "", accepted: false },
-    { price: "1e3", chain: 617, token: TOKEN, maximum: "1000", accepted: false },
+    {
+      price: "1e3",
+      chain: 617,
+      token: TOKEN,
+      maximum: "1000",
+      accepted: false,
+    },
   ])(
     "checks $price on chain $chain before any write ($accepted)",
     async ({ price, chain, token, maximum, accepted }) => {

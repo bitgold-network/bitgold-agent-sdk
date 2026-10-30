@@ -736,7 +736,7 @@ describe("NegotiationHandler", () => {
     const result = await handler.negotiate(basicRequest());
     expect(result.accepted).toBe(true);
 
-    const content = buildDescriptionContent(result.toDict(), 97);
+    const content = buildDescriptionContent(result.toDict(), 617);
     const expectedHash = keccakOfCanonical(content);
     expect(result.negotiationHash).toBe(expectedHash);
   });
@@ -906,7 +906,7 @@ describe("NegotiationSignatureBinding", () => {
     const handler = makeHandler({ walletProvider: wallet, chainId: 618 });
     const result = await handler.negotiate(basicRequest());
 
-    const content = buildDescriptionContent(result.toDict(), 56);
+    const content = buildDescriptionContent(result.toDict(), 618);
     expect(content.chain_id).toBe(618);
     expect(result.negotiationHash).toBe(keccakOfCanonical(content));
   });
@@ -920,7 +920,7 @@ describe("NegotiationSignatureBinding", () => {
     });
     const result = await handler.negotiate(basicRequest());
 
-    const content = buildDescriptionContent(result.toDict(), 97, commerceAddr);
+    const content = buildDescriptionContent(result.toDict(), 617, commerceAddr);
     expect(content.verifying_contract).toBe(commerceAddr);
     expect(result.negotiationHash).toBe(keccakOfCanonical(content));
   });

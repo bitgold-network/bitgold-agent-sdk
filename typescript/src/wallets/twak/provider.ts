@@ -142,7 +142,7 @@ export const TWAK_X402_VERIFIED_CLI = "0.20";
 /** twak v0.20.0's default public-receipt wait before it emits NETWORK_ERROR. */
 const TWAK_RECEIPT_TIMEOUT_SECONDS = 60;
 
-/** twak chain keys for BTG Smart Chain (the CLI rejects `bitgold-testnet`). */
+/** twak chain keys for Bitgold Network (the CLI rejects `bitgold-testnet`). */
 const DEFAULT_CHAIN = "bitgold";
 const ALLOWED_CHAINS = new Set(["bitgold", "bitgold-testnet"]);
 
@@ -205,7 +205,7 @@ type CanonicalContractKey =
 
 const NETWORK_FOR_TWAK_CHAIN = {
   bitgold: "bitgold-mainnet",
-  bitgold-testnet: "bitgold-testnet",
+  "bitgold-testnet": "bitgold-testnet",
 } as const;
 
 const CONTRACT_KEY_BY_INTENT: Readonly<Record<string, CanonicalContractKey>> = {
@@ -509,7 +509,7 @@ export class TWAKProvider extends WalletProvider implements IntentExecutor {
     const chain = (opts.chain ?? DEFAULT_CHAIN).toLowerCase();
     if (!ALLOWED_CHAINS.has(chain)) {
       throw new Error(
-        `TWAKProvider supports BTG Smart Chain only — chain must be one of ${[...ALLOWED_CHAINS].sort().join(", ")} (got ${JSON.stringify(opts.chain)}). ERC-8004/8183 are deployed on bitgold (mainnet) and bitgold-testnet (note: twak's testnet key is 'bitgold-testnet', not 'bitgold-testnet').`,
+        `TWAKProvider supports Bitgold Network only — chain must be one of ${[...ALLOWED_CHAINS].sort().join(", ")} (got ${JSON.stringify(opts.chain)}). ERC-8004/8183 are deployed on bitgold (mainnet) and bitgold-testnet.`,
       );
     }
     this.#chain = chain;

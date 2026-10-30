@@ -36,7 +36,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             url = await provider.upload({"test": "data"})
 
@@ -58,7 +59,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             url = await provider.upload({"data": 1})
 
@@ -77,7 +79,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             _url = await provider.upload({"data": 1}, filename="job-5.json")
 
@@ -110,7 +113,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             with pytest.raises(StorageError, match="Unexpected pinning response"):
                 await provider.upload({"data": 1})
@@ -146,7 +150,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             assert await provider.exists(f"ipfs://{VALID_CID}") is True
 
@@ -162,7 +167,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             assert await provider.exists(f"ipfs://{VALID_CID_2}") is False
 
@@ -185,7 +191,8 @@ class TestIPFSStorageProvider:
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch(
-            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient", return_value=mock_client
+            "bitgold_agent.storage.ipfs_storage_provider.httpx.AsyncClient",
+            return_value=mock_client,
         ):
             url = await provider.upload({"test": 1})
 
